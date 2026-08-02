@@ -12,7 +12,9 @@ license = { file = "LICENSE" }
 authors = [
     { name = "Self-ReAct contributors" },
 ]
-dependencies = []
+dependencies = [
+    "pydantic>=2.7,<3",
+]
 
 [project.scripts]
 self-react = "self_react.cli:main"
