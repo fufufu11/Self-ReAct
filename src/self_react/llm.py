@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from self_react.models import Message, MessageRole
@@ -23,6 +24,32 @@ class LLMInputError(LLMError, ValueError):
 
 class LLMResponseError(LLMError, ValueError):
     """LLM 适配器准备返回的响应不满足助手消息约束。"""
+
+
+class LLMConfigurationError(LLMError, ValueError):
+    """LLM 适配器启动配置无效或缺少必要配置。"""
+
+
+class LLMProviderErrorCode(str, Enum):
+    """供应商调用失败时对上层稳定暴露的错误类别。"""
+
+    AUTHENTICATION = "AUTHENTICATION"
+    TIMEOUT = "TIMEOUT"
+    CONNECTION = "CONNECTION"
+    RATE_LIMIT = "RATE_LIMIT"
+    BAD_REQUEST = "BAD_REQUEST"
+    SERVICE = "SERVICE"
+    UNKNOWN = "UNKNOWN"
+
+
+class LLMProviderError(LLMError):
+    """供应商请求失败，但调用方不应依赖 SDK 的异常类型或文本。"""
+
+    def __init__(self, code: LLMProviderErrorCode, message: str) -> None:
+        """保存稳定类别和面向调用方的安全说明。"""
+
+        self.code = code
+        super().__init__(message)
 
 
 class LLMResponseExhaustedError(LLMError):
@@ -120,7 +147,10 @@ __all__ = [
     "FakeLLM",
     "LLM",
     "LLMError",
+    "LLMConfigurationError",
     "LLMInputError",
+    "LLMProviderError",
+    "LLMProviderErrorCode",
     "LLMResponseError",
     "LLMResponseExhaustedError",
 ]
