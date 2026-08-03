@@ -13,6 +13,7 @@ authors = [
     { name = "Self-ReAct contributors" },
 ]
 dependencies = [
+    "openai>=1.0,<3",
     "pydantic>=2.7,<3",
 ]
 
