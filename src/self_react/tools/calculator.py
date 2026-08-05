@@ -193,6 +193,17 @@ class CalculatorTool:
     description = (
         "计算一个算术表达式，例如 2 + 2 * 3。支持加、减、乘、除、整除、取模、幂和括号。"
     )
+    parameters: JsonObject = {
+        "type": "object",
+        "properties": {
+            "expression": {
+                "type": "string",
+                "description": "要计算的算术表达式，例如 2 + 2 * 3",
+            },
+        },
+        "required": ["expression"],
+        "additionalProperties": False,
+    }
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次计算器调用并返回结果字符串。"""

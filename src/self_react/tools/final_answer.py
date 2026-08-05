@@ -20,6 +20,17 @@ class FinalAnswerTool:
         "任务完成时使用本工具结束对话并交付最终回答。"
         "参数 content 是给用户的最终回答文本。"
     )
+    parameters: JsonObject = {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "给用户的最终回答文本",
+            },
+        },
+        "required": ["content"],
+        "additionalProperties": False,
+    }
 
     def execute(self, arguments: JsonObject) -> str:
         """返回最终回答文本；Agent 会在分派前拦截本工具。"""

@@ -129,6 +129,17 @@ class FileReaderTool:
         "例如 notes/todo.txt；绝对路径、盘符路径和 .. 越界会被拒绝。"
         f"单次最多返回 {MAX_OUTPUT_CHARS} 个字符，超出部分会截断并标注。"
     )
+    parameters: JsonObject = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "允许目录内的相对路径，例如 notes/todo.txt",
+            },
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
 
     def __init__(self, root_directory: str | os.PathLike[str]) -> None:
         """固定允许读取的根目录；该目录是工具的安全边界。"""
