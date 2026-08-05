@@ -1,0 +1,190 @@
+# Self-ReAct 项目计划
+
+> 本文件保存项目的原始规划内容：目标、边界、技术路线、20 天计划、开发约定与
+> 参考项目。它由 Day 1 制定，在 Day 19+20 从 `README.md` 拆出，让 README 只
+> 面向使用者（安装、配置、运行、架构与局限），规划与过程记录留在文档区。
+
+## 项目目标
+
+在 20 天内完成一个可运行、可测试、可演示的 ReAct 框架。重点不在复刻成熟框架的
+全部功能，而在于亲手理解并实现 Thought（推理）、Action（行动）和 Observation
+（观察）的循环，以及工具调用、状态管理、错误处理和运行轨迹。
+
+完成后，项目应能作为大模型应用开发实习的作品：代码边界清楚、提交历史可读、
+Issue/PR 有完整上下文，且可以讲清楚每个模块为什么这样设计。
+
+## 目标边界
+
+### 本期必须完成（MVP）
+
+- Python 实现的单智能体 ReAct 循环。
+- 与模型供应商解耦的 `LLM` 接口；首个实现接入 DeepSeek 的 OpenAI 兼容 API。
+- 工具注册、参数校验、调用与错误返回。
+- 至少三个本地、确定性的工具：计算器、文本文件读取、简单知识检索或天气模拟工具。
+- 结构化的智能体状态与执行轨迹（trace）。
+- 命令行运行入口、单元测试与一份演示说明。
+- GitHub Issue 驱动的开发过程，以及每个 Issue 对应一个 PR。
+
+### 本期明确不做
+
+- 多智能体协作、长期记忆、向量数据库、RAG 平台化、Web 前端、工作流编排器。
+- 生产级鉴权、限流、持久化、分布式执行与完整可观测性平台。
+- 追求复杂提示词或基准榜单成绩。
+
+这些能力可以放进后续迭代。先让一个小而完整的 ReAct 框架真正可靠地跑通。
+
+## 建议技术路线
+
+| 领域 | 建议选择 | 原因 |
+| --- | --- | --- |
+| 语言与包管理 | Python 3.11+、`uv` 或 `venv` + `pip` | 生态成熟，便于学习 LLM 应用开发。 |
+| 数据模型 | Pydantic | 让消息、动作、工具参数和运行轨迹有清晰校验。 |
+| HTTP/模型调用 | OpenAI Python SDK 或 `httpx` | 首先采用 DeepSeek 的 OpenAI 兼容接口，后续可替换模型服务。 |
+| 测试 | pytest | 适合纯函数、工具与模拟模型的测试。 |
+| 代码质量 | ruff | 格式化与静态检查成本低。 |
+| 配置 | `.env` + 环境变量 | 不把 API Key 提交到仓库。 |
+
+第 4 天建议建立以下目录：
+
+```text
+src/self_react/
+  agent.py          # ReAct 循环编排
+  models.py         # Message、Action、Trace 等数据结构
+  llm.py            # 抽象模型接口及具体适配器
+  prompts.py        # 系统提示词与渲染逻辑
+  tools/
+    base.py         # 工具协议、注册表与调用结果
+    calculator.py
+    file_reader.py
+  parser.py         # 模型输出解析
+  cli.py            # 命令行入口
+tests/
+examples/
+docs/
+```
+
+## 20 天计划
+
+每天以 2 至 4 小时为参考。每一天结束时都应有一个可验证的结果；若时间不足，优先
+保留测试和可运行性，推迟增强功能。
+
+| 天数 | 主题 | 当日完成标准 |
+| --- | --- | --- |
+| Day 1 | 定义范围与开发规范 | 阅读本计划；确定 Python 版本、DeepSeek API Key 管理方式；初始化公开 Git 仓库、`.gitignore` 和许可证。 |
+| Day 2 | 理解 ReAct | 阅读 ReAct 论文摘要及两个参考实现；手写一页 Thought-Action-Observation 状态流说明。 |
+| Day 3 | 环境与骨架 | 建立包管理、`src` 目录、pytest、ruff 和最小 `hello` 命令。 |
+| Day 4 | 领域模型 | 定义 `Message`、`ToolCall`、`ToolResult`、`AgentState`、`TraceStep`；完成模型单元测试。 |
+| Day 5 | LLM 抽象 | 实现 `LLM` 协议和假模型（Fake LLM）；让业务代码无需依赖具体供应商。 |
+| Day 6 | 模型适配 | 接入 DeepSeek API；编写真实调用的手动验证脚本，密钥只从环境变量读取。 |
+| Day 7 | 工具接口 | 实现工具基类/协议、工具注册表、参数和异常的统一返回；测试成功与失败调用。 |
+| Day 8 | 第一个工具 | 完成计算器工具，覆盖非法表达式、除零等边界情况。 |
+| Day 9 | 第二、三个工具 | 完成受限文件读取工具及一个确定性检索/模拟工具；禁止工具越过允许目录。 |
+| Day 10 | 提示词与输出格式 | 设计最小系统提示词，要求模型返回结构化动作；明确最终回答和工具调用两种结果。 |
+| Day 11 | 输出解析 | 实现 JSON/结构化输出解析与错误信息；用 Fake LLM 覆盖合法、缺字段、未知工具三类输入。 |
+| Day 12 | ReAct 主循环 | 串起“模型 -> 解析 -> 工具 -> Observation -> 模型”；增加最大步数防止无限循环。 |
+| Day 13 | 状态与轨迹 | 保留每一步输入、动作、观察和耗时；实现人类可读的 trace 输出。 |
+| Day 14 | 鲁棒性 | 处理模型超时、工具异常、解析失败、重复动作和步数耗尽；补齐回归测试。 |
+| Day 15 | 命令行体验 | 提供任务输入、模型配置、最大步数、是否展示轨迹等 CLI 参数。 |
+| Day 16 | 端到端示例 | 编写 2 至 3 个可复现示例：单工具、多工具、工具失败后恢复。 |
+| Day 17 | 对照优秀实现 | 对比 LangChain/LangGraph 的工具调用与状态处理，只吸收一个有明确价值的改进。 |
+| Day 18 | 测试与质量 | 执行完整测试、ruff 检查；补齐关键分支的测试，确保网络依赖可被 Fake LLM 替代。 |
+| Day 19 | 文档与演示 | 完成安装、配置、运行、架构、局限性与演示记录；3分钟讲解。 |
+| Day 20 | 发布前复盘 | 从空环境验证安装和示例；清理密钥与临时文件；整理 Issue/PR 链接并打标签或发布版本。 |
+
+## GitHub 开发约定
+
+从第 3 天开始采用以下节奏：
+
+1. 一个对话窗口只讨论和解决一个 Issue。
+2. 一个 Issue 只承载一个可验收的目标，避免“实现整个框架”这类过大的 Issue。
+3. 每个 Issue 创建独立分支，例如 `feat/issue-4-tool-registry` 或 `fix/issue-11-json-parser`。
+4. 一个 PR 默认只关联一个 Issue，描述中包含问题、方案、验证方式和不做什么。
+5. 合并前至少运行相关 pytest 与 ruff；真实模型调用不作为自动化测试的前置条件。
+6. 本计划文档不对应 Issue；等项目骨架准备完成后再开始创建第一个开发 Issue。
+
+建议的 Issue 模板字段：目标、验收标准、不在范围内、验证方式。
+
+建议的 PR 模板字段：`Closes #<issue-number>`、改动、验证、风险与后续工作。
+
+## 参考项目与阅读方法
+
+参考的目的不是复制代码，而是观察模块边界、错误处理和测试策略。优先读与当前 Issue
+直接相关的部分，每次只回答一个具体问题，例如“工具如何注册并被模型选择”。
+
+| 项目 | 重点观察 | 使用建议 |
+| --- | --- | --- |
+| [LangChain](https://github.com/langchain-ai/langchain) | Agent、工具抽象、提示词组合、测试组织 | 用于理解经典 ReAct Agent 的最小组成。 |
+| [LangGraph](https://github.com/langchain-ai/langgraph) | 显式状态、循环控制、持久化边界 | 在 Day 12 至 Day 17 对照 ReAct 循环和状态演进。 |
+| [AutoGen](https://github.com/microsoft/autogen) | 模型客户端抽象、工具调用与事件模型 | 用于了解接口解耦方式，不在 MVP 中引入多智能体。 |
+| [Semantic Kernel](https://github.com/microsoft/semantic-kernel) | 插件/函数抽象、参数元数据 | 在设计工具注册表时参考，不照搬其复杂依赖。 |
+| [ReAct 论文实现索引](https://github.com/ysymyth/ReAct) | 论文任务与推理-行动轨迹 | 用于理解原始范式和示例轨迹。 |
+
+阅读顺序：先读 ReAct 论文和 `ysymyth/ReAct` 的轨迹示例，再看 LangChain 的单智能体
+实现，最后用 LangGraph 的显式状态模型反观自己的设计。AutoGen 与 Semantic Kernel
+只作为架构参考，避免过早被复杂工程细节分散注意力。
+
+## 每日记录模板
+
+建议在 `docs/daily/` 中按日期记录，格式保持简短：
+
+```markdown
+# Day N：主题
+
+## 今天理解了什么
+
+## 今天交付了什么
+
+## 遇到的问题与解决过程
+
+## 明天要验证什么
+```
+
+这类记录在面试中很有价值：它能展示你不是只会调用框架，也能从问题、假设、实现和
+验证中迭代。
+
+## 已确定的前提与待决事项
+
+### 已确定
+
+- 首个模型服务：DeepSeek API（采用其 OpenAI 兼容接口）。
+- 每天投入：2 至 4 小时，20 天计划保持不变。
+- 仓库：公开在 GitHub；Day 1 需加入许可证、贡献说明和密钥扫描习惯。
+
+### 待确定
+
+- 最终演示场景：命令行任务助手、研究资料助手，或本地文件分析助手。
+
+演示场景可以在 Day 9 完成工具能力后确定：届时根据已经可靠运行的工具来选，避免
+为了一个尚未验证的场景过早扩展范围。
+
+## 附录：完成情况与 Issue/PR 索引
+
+20 天计划已于 2026-08-05 全部完成。下表是每日学习记录与对应的 Issue/PR 链接
+（奇数编号为 Issue，偶数编号为 PR；Day 6b 与 Day 16 为补充调整日）。
+
+| 天数 | 主题 | 学习记录 | Issue / PR |
+| --- | --- | --- | --- |
+| Day 1 | 定义范围与开发规范 | [day-01](daily/day-01-project-scope-and-development-conventions.md) | [#1](https://github.com/fufufu11/Self-ReAct/issues/1) / [#2](https://github.com/fufufu11/Self-ReAct/pull/2) |
+| Day 2 | 理解 ReAct | [day-02](daily/day-02-understanding-react.md) | [#3](https://github.com/fufufu11/Self-ReAct/issues/3) / [#4](https://github.com/fufufu11/Self-ReAct/pull/4) |
+| Day 3 | 环境与骨架 | [day-03](daily/day-03-environment-and-project-skeleton.md) | [#5](https://github.com/fufufu11/Self-ReAct/issues/5) / [#6](https://github.com/fufufu11/Self-ReAct/pull/6) |
+| Day 4 | 领域模型 | [day-04](daily/day-04-domain-model.md) | [#7](https://github.com/fufufu11/Self-ReAct/issues/7) / [#8](https://github.com/fufufu11/Self-ReAct/pull/8) |
+| Day 5 | LLM 抽象 | [day-05](daily/day-05-llm-abstraction.md) | [#9](https://github.com/fufufu11/Self-ReAct/issues/9) / [#10](https://github.com/fufufu11/Self-ReAct/pull/10) |
+| Day 6 | 模型适配 | [day-06](daily/day-06-deepseek-adapter.md) | [#11](https://github.com/fufufu11/Self-ReAct/issues/11) / [#12](https://github.com/fufufu11/Self-ReAct/pull/12) |
+| Day 6b | DeepSeek 原生工具调用 | [day-06b](daily/day-06b-deepseek-native-tool-calls.md) | [#32](https://github.com/fufufu11/Self-ReAct/issues/32) / [#33](https://github.com/fufufu11/Self-ReAct/pull/33) + [#34](https://github.com/fufufu11/Self-ReAct/pull/34) |
+| Day 7 | 工具接口 | [day-07](daily/day-07-tool-registry.md) | [#13](https://github.com/fufufu11/Self-ReAct/issues/13) / [#14](https://github.com/fufufu11/Self-ReAct/pull/14) |
+| Day 8 | 第一个工具 | [day-08](daily/day-08-calculator.md) | [#15](https://github.com/fufufu11/Self-ReAct/issues/15) / [#16](https://github.com/fufufu11/Self-ReAct/pull/16) |
+| Day 9 | 第二、三个工具 | [day-09](daily/day-09-file-reader-retrieve.md) | [#17](https://github.com/fufufu11/Self-ReAct/issues/17) / [#18](https://github.com/fufufu11/Self-ReAct/pull/18) |
+| Day 10 | 提示词与输出格式 | [day-10](daily/day-10-system-prompt.md) | [#19](https://github.com/fufufu11/Self-ReAct/issues/19) / [#20](https://github.com/fufufu11/Self-ReAct/pull/20) |
+| Day 11 | 输出解析 | [day-11](daily/day-11-parser.md) | [#21](https://github.com/fufufu11/Self-ReAct/issues/21) / [#22](https://github.com/fufufu11/Self-ReAct/pull/22) |
+| Day 12 | ReAct 主循环 | [day-12](daily/day-12-agent-loop.md) | [#23](https://github.com/fufufu11/Self-ReAct/issues/23) / [#24](https://github.com/fufufu11/Self-ReAct/pull/24) |
+| Day 13 | 状态与轨迹 | [day-13](daily/day-13-trace-rendering.md) | [#25](https://github.com/fufufu11/Self-ReAct/issues/25) / [#26](https://github.com/fufufu11/Self-ReAct/pull/26) |
+| Day 14 | 鲁棒性 | [day-14](daily/day-14-robustness.md) | [#27](https://github.com/fufufu11/Self-ReAct/issues/27) / [#28](https://github.com/fufufu11/Self-ReAct/pull/28) |
+| Day 15 | 命令行体验 | [day-15](daily/day-15-cli-experience.md) | [#29](https://github.com/fufufu11/Self-ReAct/issues/29) / [#30](https://github.com/fufufu11/Self-ReAct/pull/30) |
+| Day 16 | 端到端示例 | [day-16](daily/day-16-end-to-end-examples.md) | [#35](https://github.com/fufufu11/Self-ReAct/issues/35) / [#36](https://github.com/fufufu11/Self-ReAct/pull/36) |
+| Day 17 | 对照优秀实现 | [day-17](daily/day-17-compare-excellent-implementations.md) | [#37](https://github.com/fufufu11/Self-ReAct/issues/37) / [#38](https://github.com/fufufu11/Self-ReAct/pull/38) |
+| Day 18 | 测试与质量 | [day-18](daily/day-18-testing-and-quality.md) | [#39](https://github.com/fufufu11/Self-ReAct/issues/39) / [#40](https://github.com/fufufu11/Self-ReAct/pull/40) |
+| Day 19+20 | 文档与演示 + 发布前复盘 | [day-19-20](daily/day-19-20-docs-and-demo.md) | [#41](https://github.com/fufufu11/Self-ReAct/issues/41) / [#42](https://github.com/fufufu11/Self-ReAct/pull/42) |
+
+每个学习日的架构导读存放在 `docs/architecture/`，文件名以
+`day-<编号>-<主题>-code-walkthrough.md` 命名；核心循环的调研结论见
+[react-loop.md](architecture/react-loop.md)。
