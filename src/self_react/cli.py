@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from typing import Callable
 
 from self_react.agent import Agent
+from self_react.examples import EXAMPLES, run_example
 from self_react.llm import (
     LLM,
     FakeLLM,
@@ -200,6 +201,19 @@ def _create_parser() -> argparse.ArgumentParser:
         default=False,
         help="是否打印人类可读执行轨迹；默认不打印（可用 --no-show-trace 显式关闭）。",
     )
+    example_parser = subcommands.add_parser(
+        "example",
+        help="运行 Day 16 确定性端到端示例（无需网络与 API Key）。",
+    )
+    example_parser.add_argument(
+        "name",
+        choices=sorted(EXAMPLES),
+        metavar="NAME",
+        help=(
+            "示例名称：single-tool（单工具）、multi-tool（多工具）、"
+            "failure-recovery（工具失败后恢复）。"
+        ),
+    )
     return parser
 
 
@@ -237,6 +251,34 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
     return 0
 
 
+def _example_command(arguments: argparse.Namespace) -> int:
+    """执行 ``example`` 子命令：运行确定性端到端示例并打印轨迹。
+
+    示例是 Day 16 的可复现演示：任务、工具序列与最终回答全部固定，使用
+    Fake LLM 与确定性工具，不访问网络、不依赖 API Key。命令始终打印
+    最终回答与 ``render_trace`` 的完整人类可读轨迹，让三条主线
+    （单工具、多工具、工具失败后恢复）可以离线复现。
+    """
+
+    scenario = EXAMPLES[arguments.name]
+    state = run_example(arguments.name)
+
+    print(f"=== 示例：{scenario.title}（{scenario.name}） ===")
+    if state.final_answer is not None:
+        print(f"最终回答：{state.final_answer.content}")
+    elif state.termination_reason is not None:
+        label = _TERMINATION_LABELS.get(
+            state.termination_reason,
+            state.termination_reason.value,
+        )
+        print(f"运行终止（{label}），没有最终回答。")
+    else:
+        print("运行未终止，且没有最终回答。")
+    print()
+    print(render_trace(state))
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -258,6 +300,8 @@ def main(
         return 0
     if arguments.command == "run":
         return _run_command(arguments, build_llm)
+    if arguments.command == "example":
+        return _example_command(arguments)
 
     # ``argparse`` 已保证 command 只能是已登记子命令；保留防御分支，使未来
     # 新增命令却遗漏实现时能得到非零退出码，而不是静默成功。
