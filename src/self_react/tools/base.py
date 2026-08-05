@@ -18,6 +18,14 @@ from self_react.models import (
     ToolResult,
 )
 
+DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
+"""工具未声明 ``parameters`` 时 LLM 适配器下发的宽松参数形状。
+
+Day 17 对照 LangChain/LangGraph 吸收的改进是让工具自述参数：业务工具可以
+声明可选的 ``parameters`` 类属性（JSON Schema 对象），适配器把它随工具
+定义下发给模型；未声明时使用本常量，保持既有行为不变。
+"""
+
 
 class ToolArgumentError(ValueError):
     """工具发现参数不满足业务要求时抛出的稳定异常。
@@ -50,10 +58,18 @@ class Tool(Protocol):
     """确定性本地工具的最小协议。
 
     ``name`` 是注册表使用的精确名称；``description`` 是后续提示词提供给
-    模型的说明；``execute`` 接收已由领域模型校验过的参数字典并返回模型可读
-    的字符串内容。工具只做自己的业务，不接触 ``Message``、``AgentState``、
-    注册表或密钥；失败时抛出 ``ToolArgumentError`` 或
-    ``ToolExecutionError``，由注册表统一转换。
+    模型的说明；可选的 ``parameters`` 是描述参数的 JSON Schema 对象（例如
+    ``{"type": "object", "properties": {"query": {"type": "string"}},
+    "required": ["query"], "additionalProperties": False}``），LLM 适配器
+    把它下发给模型以生成合法参数，未声明时使用
+    ``DEFAULT_PARAMETERS_SCHEMA``；``execute`` 接收已由领域模型校验过的
+    参数字典并返回模型可读的字符串内容。工具只做自己的业务，不接触
+    ``Message``、``AgentState``、注册表或密钥；失败时抛出
+    ``ToolArgumentError`` 或 ``ToolExecutionError``，由注册表统一转换。
+
+    注意：``parameters`` 是可选约定，不是协议必需成员。协议只要求
+    ``name``、``description`` 与 ``execute``；适配器通过 ``getattr`` 读取
+    可选的 ``parameters``，因此不声明 schema 的简单工具仍然满足协议。
     """
 
     name: str
@@ -184,6 +200,7 @@ class ToolRegistry:
 
 
 __all__ = [
+    "DEFAULT_PARAMETERS_SCHEMA",
     "Tool",
     "ToolArgumentError",
     "ToolExecutionError",

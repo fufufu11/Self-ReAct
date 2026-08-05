@@ -6,6 +6,7 @@ Day 7 提供最小工具层，Day 8 加入计算器，Day 9 加入受限文件�
 """
 
 from self_react.tools.base import (
+    DEFAULT_PARAMETERS_SCHEMA,
     Tool,
     ToolArgumentError,
     ToolExecutionError,
@@ -19,6 +20,7 @@ from self_react.tools.retrieve import RetrieveTool
 
 __all__ = [
     "CalculatorTool",
+    "DEFAULT_PARAMETERS_SCHEMA",
     "FileReaderTool",
     "FinalAnswerTool",
     "RetrieveTool",

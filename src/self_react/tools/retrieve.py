@@ -79,6 +79,19 @@ class RetrieveTool:
         "例如 react、python、deepseek、uv、pydantic；相同输入返回相同结果，"
         "未知主题返回稳定错误。"
     )
+    parameters: JsonObject = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "知识库主题词，例如 react、python、deepseek、uv、pydantic"
+                ),
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    }
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次知识检索并返回主题说明。"""

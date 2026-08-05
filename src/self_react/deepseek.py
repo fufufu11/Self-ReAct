@@ -32,6 +32,7 @@ from self_react.llm import (
     LLMResponseError,
 )
 from self_react.models import Message, MessageRole, ToolCall
+from self_react.tools.base import DEFAULT_PARAMETERS_SCHEMA
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -166,12 +167,35 @@ def _tool_description(tool: object) -> str:
     return description
 
 
+def _tool_parameters(tool: object, name: str) -> dict[str, Any]:
+    """读取工具声明的参数 JSON Schema；缺省时返回宽松对象。
+
+    ``parameters`` 是工具层的可选约定（Day 17）：未声明时回退到
+    ``DEFAULT_PARAMETERS_SCHEMA``，与 Day 6b 的既有行为一致；有声明但
+    不是 JSON 对象或不可 JSON 序列化时抛 ``LLMInputError``，避免把非法
+    schema 悄悄下发给供应商。
+    """
+
+    parameters = getattr(tool, "parameters", None)
+    if parameters is None:
+        return dict(DEFAULT_PARAMETERS_SCHEMA)
+    if not isinstance(parameters, dict):
+        raise LLMInputError(f"工具 {name} 的 parameters 必须是 JSON 对象")
+    try:
+        json.dumps(parameters, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise LLMInputError(
+            f"工具 {name} 的 parameters 必须只包含可 JSON 序列化的值"
+        ) from exc
+    return parameters
+
+
 def _serialize_tools(tools: Sequence[object]) -> list[dict[str, Any]]:
     """把工具清单序列化成供应商 function 定义。
 
-    参数形状使用宽松的 ``{"type": "object", "properties": {}}``：参数知识
-    由各工具的 description 说明，工具层在 Day 7 注册表边界做实际校验，避免
-    适配器复制工具业务逻辑。
+    参数形状优先使用工具声明的 ``parameters`` JSON Schema（Day 17），
+    未声明时回退到宽松对象。参数的实际校验仍由工具层在 Day 7 注册表边界
+    完成，适配器不复制工具业务逻辑。
     """
 
     if isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
@@ -190,7 +214,7 @@ def _serialize_tools(tools: Sequence[object]) -> list[dict[str, Any]]:
                 "function": {
                     "name": name,
                     "description": _tool_description(tool),
-                    "parameters": {"type": "object", "properties": {}},
+                    "parameters": _tool_parameters(tool, name),
                 },
             }
         )
