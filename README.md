@@ -1,8 +1,8 @@
 # Self-ReAct
 
-> 一个面向学习和实习作品集的最小可用 ReAct（Reason + Act）智能体框架。
+> 一个最小可用、可测试、可演示的 ReAct（Reason + Act）智能体框架。
 
-Self-ReAct 用 20 天从零实现了一个单智能体 ReAct 闭环：模型基于当前状态做决策，
+Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态做决策，
 要么调用一个本地工具，要么直接给出最终回答；工具结果作为观察（Observation）
 回写上下文，模型据此进入下一轮决策，直到给出最终回答或触发明确的终止条件。
 
@@ -187,14 +187,14 @@ uv run self-react example failure-recovery
 
 ### 3分钟讲解
 
-面向面试的 3 分钟讲解稿见 [`docs/demo/3-minute-talk.md`](docs/demo/3-minute-talk.md)。
+3 分钟讲解稿见 [`docs/demo/3-minute-talk.md`](docs/demo/3-minute-talk.md)。
 
 ## 文档导航
 
-- [项目计划](docs/project-plan.md)：目标、边界、20 天计划、开发约定与 Issue/PR 索引。
+- [项目计划](docs/project-plan.md)：目标、边界、开发约定与 Issue/PR 索引。
 - [CONTEXT.md](CONTEXT.md)：领域上下文与统一术语。
 - [ReAct 核心循环](docs/architecture/react-loop.md)：论文调研与状态图。
-- [每日学习记录](docs/daily/)：每天理解了什么、交付了什么、遇到的问题。
+- [每日记录](docs/daily/)：每日开发过程、遇到的问题与验证结果。
 - [架构导读](docs/architecture/)：每个模块的代码导读。
 - [贡献指南](CONTRIBUTING.md)：开发流程、提交信息与分支规范。
 - [LICENSE](LICENSE)：MIT License。
