@@ -37,6 +37,7 @@ from self_react.models import (
 from self_react.parser import ParseError, parse_decision
 from self_react.prompts import render_system_prompt
 from self_react.tools import ToolRegistry
+from self_react.tools.final_answer import FinalAnswerTool
 
 _SUMMARY_LIMIT = 2_000
 """输入摘要的最大字符数，与 ``TraceStep.input_summary`` 的领域上限一致。"""
@@ -162,32 +163,71 @@ class Agent:
             step_number = state.steps_used + 1
             input_summary = _summarize_input(state)
             started = time.perf_counter()
-            response = self._llm.complete(messages)
+            response = self._llm.complete(messages, tools=tools)
             duration_ms = (time.perf_counter() - started) * 1_000.0
             messages.append(response)
 
-            try:
-                decision = parse_decision(response.content)
-            except ParseError as exc:
-                step = TraceStep(
-                    step_number=step_number,
-                    input_summary=input_summary,
-                    error=TraceError(
-                        code=exc.code,
-                        message=str(exc),
-                        retryable=False,
-                    ),
-                    duration_ms=duration_ms,
-                )
-                state = self._rebuild_state(
-                    task=task,
-                    tool_names=tool_names,
-                    messages=messages,
-                    steps_used=step_number,
-                    trace=[*state.trace, step],
-                    termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
-                )
-                break
+            if response.tool_calls:
+                if len(response.tool_calls) > 1:
+                    # 供应商一次性返回多个工具调用：领域模型每轮只支持一个
+                    # 决策，因此只执行第一个，其余写成可恢复失败观察并回写
+                    # 消息，让 API 历史中每个 tool_call_id 都有对应 tool
+                    # 消息，同时提示模型把其余工具留到后续轮次。
+                    decision: FinalAnswer | ToolCall = response.tool_calls[0]
+                    result = self._registry.execute(decision)
+                    observation = Observation.from_tool_result(result)
+                    messages.append(observation.as_message())
+                    for extra_call in response.tool_calls[1:]:
+                        extra_observation = Observation(
+                            tool_call_id=extra_call.call_id,
+                            tool_name=extra_call.name,
+                            content="本轮只执行了一个工具；请在后续轮次再请求该工具",
+                            is_error=True,
+                            error_code=ToolErrorCode.TOOL_EXECUTION_ERROR,
+                            retryable=True,
+                        )
+                        messages.append(extra_observation.as_message())
+                    step = TraceStep(
+                        step_number=step_number,
+                        input_summary=input_summary,
+                        decision=decision,
+                        observation=observation,
+                        duration_ms=duration_ms,
+                    )
+                    state = self._rebuild_state(
+                        task=task,
+                        tool_names=tool_names,
+                        messages=messages,
+                        steps_used=step_number,
+                        trace=[*state.trace, step],
+                    )
+                    continue
+                # 供应商原生工具调用：每轮一个工具，直接作为本轮决策，
+                # 不经过文本 JSON 解析。
+                decision: FinalAnswer | ToolCall = response.tool_calls[0]
+            else:
+                try:
+                    decision = parse_decision(response.content)
+                except ParseError as exc:
+                    step = TraceStep(
+                        step_number=step_number,
+                        input_summary=input_summary,
+                        error=TraceError(
+                            code=exc.code,
+                            message=str(exc),
+                            retryable=False,
+                        ),
+                        duration_ms=duration_ms,
+                    )
+                    state = self._rebuild_state(
+                        task=task,
+                        tool_names=tool_names,
+                        messages=messages,
+                        steps_used=step_number,
+                        trace=[*state.trace, step],
+                        termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+                    )
+                    break
 
             if isinstance(decision, FinalAnswer):
                 step = TraceStep(
@@ -208,9 +248,41 @@ class Agent:
                 break
 
             if not isinstance(decision, ToolCall):
-                # parse_decision 只返回 FinalAnswer 或 ToolCall；此处为类型收窄
-                # 的防御分支，正常情况下不可达。
-                raise RuntimeError("parse_decision 返回了未知决策类型")
+                # 类型收窄的防御分支，正常情况下不可达。
+                raise RuntimeError("LLM 返回了未知决策类型")
+
+            if decision.name == FinalAnswerTool.name:
+                # 特殊工具：模型用原生 tool_calls 交付最终回答。直接转换为
+                # FinalAnswer 决策并终止；写回一条 tool 消息保持 API 历史
+                # 完整（每个 tool_call_id 都有对应响应），轨迹只记录决策。
+                content = decision.arguments.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    content = "（无内容）"
+                answer = FinalAnswer(content=content)
+                messages.append(
+                    Observation(
+                        tool_call_id=decision.call_id,
+                        tool_name=FinalAnswerTool.name,
+                        content=content,
+                        is_error=False,
+                    ).as_message()
+                )
+                step = TraceStep(
+                    step_number=step_number,
+                    input_summary=input_summary,
+                    decision=answer,
+                    duration_ms=duration_ms,
+                )
+                state = self._rebuild_state(
+                    task=task,
+                    tool_names=tool_names,
+                    messages=messages,
+                    steps_used=step_number,
+                    trace=[*state.trace, step],
+                    final_answer=answer,
+                    termination_reason=TerminationReason.FINAL_ANSWER,
+                )
+                break
 
             repeated_message = _repeated_action_reason(decision, state)
             if repeated_message is not None:
@@ -247,6 +319,8 @@ class Agent:
                     _termination_reason_for(result) if terminated else None
                 ),
             )
+
+            continue
 
         return state
 

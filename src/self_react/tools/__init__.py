@@ -14,11 +14,13 @@ from self_react.tools.base import (
 )
 from self_react.tools.calculator import CalculatorTool
 from self_react.tools.file_reader import FileReaderTool
+from self_react.tools.final_answer import FinalAnswerTool
 from self_react.tools.retrieve import RetrieveTool
 
 __all__ = [
     "CalculatorTool",
     "FileReaderTool",
+    "FinalAnswerTool",
     "RetrieveTool",
     "Tool",
     "ToolArgumentError",

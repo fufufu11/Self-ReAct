@@ -108,7 +108,12 @@ def test_llm_protocol_accepts_an_independent_adapter() -> None:
     """调用方可以只依赖 LLM 接口替换适配器。"""
 
     class AlternateLLM:
-        def complete(self, messages: Sequence[Message]) -> Message:
+        def complete(
+            self,
+            messages: Sequence[Message],
+            *,
+            tools: Sequence[object] | None = None,
+        ) -> Message:
             assert messages
             return assistant_message("来自另一适配器")
 
