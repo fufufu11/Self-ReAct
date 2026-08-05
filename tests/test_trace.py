@@ -1,10 +1,11 @@
-"""Day 13 人类可读轨迹渲染的公开行为测试。
+"""Day 13 人类可读轨迹渲染的公开行为测试（Day 14 补充重复动作标签）。
 
 测试覆盖确定性（相同状态两次渲染完全一致）、字段一一对应（输入摘要、决策、
 观察、错误、耗时都出现在文本中且顺序一致）、四类轨迹（最终回答、工具调用、
 解析失败、步数耗尽）以及端到端分支（未知工具、可恢复失败后恢复、不可恢复
-失败终止）。全部使用 Fake LLM 与三个真实工具，不访问网络、不调用真实 API。
-公开缝是 ``render_trace(state: AgentState) -> str``，不触碰渲染内部实现。
+失败终止、重复动作）。全部使用 Fake LLM 与三个真实工具，不访问网络、不调用
+真实 API。公开缝是 ``render_trace(state: AgentState) -> str``，不触碰渲染
+内部实现。
 """
 
 from __future__ import annotations
@@ -347,6 +348,55 @@ def test_render_unknown_tool_termination_label() -> None:
     assert "终止原因：未知工具（UNKNOWN_TOOL）" in text
     assert "错误码：未知工具（UNKNOWN_TOOL）" in text
     assert "可重试：否" in text
+
+
+def test_render_repeated_action_observation_label() -> None:
+    """重复动作观察：新增错误码只影响标签映射，输出格式与既有失败观察一致。"""
+
+    state = AgentState(
+        task="计算 2 + 2",
+        messages=[],
+        available_tools=["calculator"],
+        max_steps=2,
+        steps_used=2,
+        trace=[
+            TraceStep(
+                step_number=1,
+                input_summary="计算 2 + 2",
+                decision=ToolCall(
+                    call_id="call-1",
+                    name="calculator",
+                    arguments={"expression": "2 + 2"},
+                ),
+                observation=_success_observation("call-1", "calculator", "4"),
+                duration_ms=0.1,
+            ),
+            TraceStep(
+                step_number=2,
+                input_summary="4",
+                decision=ToolCall(
+                    call_id="call-2",
+                    name="calculator",
+                    arguments={"expression": "2 + 2"},
+                ),
+                observation=Observation(
+                    tool_call_id="call-2",
+                    tool_name="calculator",
+                    content="重复动作：工具 calculator 已用相同参数调用过",
+                    is_error=True,
+                    error_code=ToolErrorCode.REPEATED_ACTION,
+                    retryable=True,
+                ),
+                duration_ms=0.1,
+            ),
+        ],
+        termination_reason=TerminationReason.MAX_STEPS_EXCEEDED,
+    )
+
+    text = render_trace(state)
+    assert "观察（失败）：重复动作：工具 calculator 已用相同参数调用过" in text
+    assert "错误码：重复动作（REPEATED_ACTION）" in text
+    assert "可重试：是" in text
 
 
 def test_render_is_deterministic_and_argument_order_stable() -> None:

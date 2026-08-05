@@ -299,3 +299,23 @@ def test_deepseek_maps_unknown_provider_exception_to_unknown() -> None:
 
     assert caught.value.code is LLMProviderErrorCode.UNKNOWN
     assert "secret" not in str(caught.value)
+
+
+def test_deepseek_timeout_and_connection_codes_are_distinct_and_stable() -> None:
+    """超时与连接失败是互不混淆的稳定类别，不依赖 SDK 异常文本。"""
+
+    timeout_llm = DeepSeekLLM(
+        client=RecordingClient(error=APITimeoutError(request=SimpleNamespace()))
+    )
+    connection_llm = DeepSeekLLM(
+        client=RecordingClient(error=APIConnectionError(request=SimpleNamespace()))
+    )
+
+    with pytest.raises(LLMProviderError) as timeout:
+        timeout_llm.complete([Message(role=MessageRole.USER, content="测试")])
+    with pytest.raises(LLMProviderError) as connection:
+        connection_llm.complete([Message(role=MessageRole.USER, content="测试")])
+
+    assert timeout.value.code is LLMProviderErrorCode.TIMEOUT
+    assert connection.value.code is LLMProviderErrorCode.CONNECTION
+    assert timeout.value.code is not connection.value.code

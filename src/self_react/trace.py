@@ -51,6 +51,7 @@ _TOOL_ERROR_LABELS: dict[ToolErrorCode, str] = {
     ToolErrorCode.INVALID_ARGUMENTS: "参数无效",
     ToolErrorCode.UNKNOWN_TOOL: "未知工具",
     ToolErrorCode.TOOL_EXECUTION_ERROR: "工具执行失败",
+    ToolErrorCode.REPEATED_ACTION: "重复动作",
     ToolErrorCode.TIMEOUT: "超时",
     ToolErrorCode.PERMISSION_DENIED: "权限不足",
 }
