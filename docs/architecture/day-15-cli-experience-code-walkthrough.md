@@ -159,10 +159,7 @@ def _demo_fake_llm() -> FakeLLM:
     """构造确定性离线演示用 Fake LLM。"""
 
     return FakeLLM(
-        [
-            Message(role=MessageRole.ASSISTANT, content=json.dumps({...})),
-            ...
-        ]
+        [Message(role=MessageRole.ASSISTANT, content=json.dumps({...})), ...]
     )
 ```
 
@@ -246,7 +243,7 @@ CLI 组装 Day 7 注册表并登记三个真实工具。`file_reader` 的根目�
 ```python
 run_parser.add_argument(
     "task",
-    help="要执行的任务文本，例如 \"计算 2 + 2\"。",
+    help='要执行的任务文本，例如 "计算 2 + 2"。',
 )
 run_parser.add_argument(
     "--model",
