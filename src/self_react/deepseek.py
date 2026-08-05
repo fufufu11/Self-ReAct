@@ -36,6 +36,14 @@ from self_react.models import Message, MessageRole, ToolCall
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TIMEOUT = 30.0
+DEFAULT_THINKING_DISABLED = True
+"""默认禁用 DeepSeek 思考模式。
+
+思考模式会在响应里返回 ``reasoning_content``，DeepSeek 要求后续请求原样
+传回它；本项目按 Day 10 契约只保留模型输出的 JSON 决策，无法保证
+``reasoning_content`` 的完整往返，因此默认关闭思考模式，避免多轮工具调用
+被 API 拒绝。
+"""
 
 
 class _CompletionsClient(Protocol):
@@ -47,6 +55,8 @@ class _CompletionsClient(Protocol):
         model: str,
         messages: Sequence[Mapping[str, Any]],
         stream: bool,
+        tools: list[dict[str, Any]] | None,
+        extra_body: dict[str, Any] | None,
     ) -> Any:
         """创建一次非流式 Chat Completions 请求。"""
         ...
@@ -136,6 +146,55 @@ def _serialize_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     if not all(isinstance(message, Message) for message in messages):
         raise LLMInputError("messages 中的每一项都必须是 Message")
     return [_serialize_message(message.model_copy(deep=True)) for message in messages]
+
+
+def _tool_name(tool: object) -> str:
+    """读取工具名称，供工具定义序列化使用。"""
+
+    name = getattr(tool, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        raise LLMInputError("工具 name 必须是非空字符串")
+    return name
+
+
+def _tool_description(tool: object) -> str:
+    """读取工具描述，供工具定义序列化使用；缺失时使用稳定占位符。"""
+
+    description = getattr(tool, "description", "")
+    if not isinstance(description, str) or not description.strip():
+        return "（无描述）"
+    return description
+
+
+def _serialize_tools(tools: Sequence[object]) -> list[dict[str, Any]]:
+    """把工具清单序列化成供应商 function 定义。
+
+    参数形状使用宽松的 ``{"type": "object", "properties": {}}``：参数知识
+    由各工具的 description 说明，工具层在 Day 7 注册表边界做实际校验，避免
+    适配器复制工具业务逻辑。
+    """
+
+    if isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
+        raise LLMInputError("tools 必须是工具序列")
+
+    serialized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        name = _tool_name(tool)
+        if name in seen:
+            raise LLMInputError(f"工具定义重复：{name}")
+        seen.add(name)
+        serialized.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": _tool_description(tool),
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+    return serialized
 
 
 def _deserialize_tool_call(raw_call: Any) -> ToolCall:
@@ -247,6 +306,7 @@ class DeepSeekLLM:
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
+        thinking_disabled: bool = DEFAULT_THINKING_DISABLED,
         client: _Client | None = None,
     ) -> None:
         """校验配置并建立客户端；不会把密钥写入领域状态或日志。"""
@@ -265,6 +325,7 @@ class DeepSeekLLM:
         self.model = model
         self.base_url = base_url
         self.timeout = float(timeout)
+        self.thinking_disabled = bool(thinking_disabled)
 
         if client is not None:
             self._client = client
@@ -280,15 +341,26 @@ class DeepSeekLLM:
             max_retries=0,
         )
 
-    def complete(self, messages: Sequence[Message]) -> Message:
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Message:
         """发起一次非流式请求，并返回 assistant Message。"""
 
         payload = _serialize_messages(messages)
+        serialized_tools = _serialize_tools(tools) if tools is not None else None
+        extra_body: dict[str, Any] = {}
+        if self.thinking_disabled:
+            extra_body["thinking"] = {"type": "disabled"}
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
                 messages=payload,
                 stream=False,
+                tools=serialized_tools,
+                extra_body=extra_body,
             )
         except Exception as exc:
             code = _provider_error_code(exc)

@@ -30,7 +30,13 @@ from self_react.llm import (
     LLMProviderError,
 )
 from self_react.models import Message, MessageRole, TerminationReason
-from self_react.tools import CalculatorTool, FileReaderTool, RetrieveTool, ToolRegistry
+from self_react.tools import (
+    CalculatorTool,
+    FileReaderTool,
+    FinalAnswerTool,
+    RetrieveTool,
+    ToolRegistry,
+)
 from self_react.trace import render_trace
 
 HELLO_MESSAGE = "Hello from Self-ReAct!"
@@ -141,6 +147,7 @@ def _build_registry() -> ToolRegistry:
     registry.register(CalculatorTool())
     registry.register(FileReaderTool(root_directory="C:/allowed"))
     registry.register(RetrieveTool())
+    registry.register(FinalAnswerTool())
     return registry
 
 

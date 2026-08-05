@@ -54,6 +54,7 @@ def test_render_documents_both_mutually_exclusive_decision_kinds() -> None:
     assert '"kind": "final_answer"' in prompt
     assert '"kind": "tool_call"' in prompt
     assert "互斥" in prompt
+    assert "每轮只能请求调用一个工具" in prompt
     assert "call_id" in prompt
     assert "arguments" in prompt
 

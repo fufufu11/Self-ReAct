@@ -65,7 +65,12 @@ class LLM(Protocol):
     这一接口，因此未来供应商适配器可以替换 Fake LLM，而无需改变 Agent。
     """
 
-    def complete(self, messages: Sequence[Message]) -> Message:
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Message:
         """根据完整消息上下文生成下一条助手消息。"""
         ...
 
@@ -113,11 +118,30 @@ class FakeLLM:
         self._responses = _snapshot_responses(responses)
         self._next_response_index = 0
         self._calls: list[tuple[Message, ...]] = []
+        self._calls_with_tools: list[
+            tuple[tuple[Message, ...], tuple[object, ...]]
+        ] = []
 
-    def complete(self, messages: Sequence[Message]) -> Message:
-        """记录输入并返回下一条独立的预置响应副本。"""
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Message:
+        """记录输入并返回下一条独立的预置响应副本。
+
+        ``tools`` 是可选工具清单，供供应商适配器生成工具定义；Fake LLM
+        只做记录，不改变返回行为。
+        """
 
         snapshot = _snapshot_input(messages)
+        if tools is None:
+            tools_snapshot: tuple[object, ...] = ()
+        elif isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
+            raise LLMInputError("tools 必须是工具序列")
+        else:
+            tools_snapshot = tuple(tools)
+        self._calls_with_tools.append((snapshot, tools_snapshot))
         self._calls.append(snapshot)
 
         if self._next_response_index >= len(self._responses):
@@ -141,6 +165,20 @@ class FakeLLM:
         """返回合法调用尝试次数，包括响应耗尽的尝试。"""
 
         return len(self._calls)
+
+    @property
+    def calls_with_tools(
+        self,
+    ) -> tuple[tuple[tuple[Message, ...], tuple[object, ...]], ...]:
+        """返回每次调用的消息快照与工具清单快照，供测试断言适配器输入。"""
+
+        return tuple(
+            (
+                tuple(message.model_copy(deep=True) for message in messages),
+                tools,
+            )
+            for messages, tools in self._calls_with_tools
+        )
 
 
 __all__ = [

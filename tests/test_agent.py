@@ -34,6 +34,7 @@ from self_react.prompts import render_system_prompt
 from self_react.tools import (
     CalculatorTool,
     FileReaderTool,
+    FinalAnswerTool,
     RetrieveTool,
     ToolExecutionError,
     ToolRegistry,
@@ -79,12 +80,13 @@ def _tool_call_json(
 
 
 def _default_registry() -> ToolRegistry:
-    """注册三个真实业务工具；file_reader 根目录在测试中不会被真正读取。"""
+    """注册三个真实业务工具与 final_answer 特殊工具。"""
 
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(FileReaderTool(root_directory="C:/allowed"))
     registry.register(RetrieveTool())
+    registry.register(FinalAnswerTool())
     return registry
 
 
@@ -124,10 +126,20 @@ def test_system_message_uses_day10_prompt_and_state_tracks_tools() -> None:
 
     assert state.messages[0].role is MessageRole.SYSTEM
     assert state.messages[0].content == render_system_prompt(
-        [CalculatorTool(), FileReaderTool(root_directory="C:/allowed"), RetrieveTool()]
+        [
+            CalculatorTool(),
+            FileReaderTool(root_directory="C:/allowed"),
+            FinalAnswerTool(),
+            RetrieveTool(),
+        ]
     )
     assert state.messages[1] == Message(role=MessageRole.USER, content="回答我")
-    assert state.available_tools == ["calculator", "file_reader", "retrieve"]
+    assert state.available_tools == [
+        "calculator",
+        "file_reader",
+        "retrieve",
+        "final_answer",
+    ]
 
 
 def test_single_tool_call_writes_observation_then_final_answer() -> None:
@@ -520,7 +532,12 @@ def test_llm_provider_error_propagates_unchanged(
     class TimeoutLLM:
         """确定性适配器：每次 complete 都抛稳定供应商错误。"""
 
-        def complete(self, messages: Sequence[Message]) -> Message:
+        def complete(
+            self,
+            messages: Sequence[Message],
+            *,
+            tools: Sequence[object] | None = None,
+        ) -> Message:
             raise LLMProviderError(code, message)
 
     registry = _default_registry()
@@ -709,7 +726,12 @@ def test_agent_accepts_any_llm_protocol_adapter() -> None:
     """只要满足 LLM 协议，Agent 就可以替换任何适配器。"""
 
     class FixedLLM:
-        def complete(self, messages: Sequence[Message]) -> Message:
+        def complete(
+            self,
+            messages: Sequence[Message],
+            *,
+            tools: Sequence[object] | None = None,
+        ) -> Message:
             return _final_answer_json("固定回答")
 
     adapter = FixedLLM()
@@ -719,3 +741,120 @@ def test_agent_accepts_any_llm_protocol_adapter() -> None:
 
     assert state.termination_reason is TerminationReason.FINAL_ANSWER
     assert state.final_answer == FinalAnswer(content="固定回答")
+
+
+def test_agent_consumes_native_tool_calls_from_assistant_message() -> None:
+    """供应商原生 tool_calls：Agent 直接执行工具，不经过文本 JSON 解析。"""
+
+    call = ToolCall(
+        call_id="call-1",
+        name="calculator",
+        arguments={"expression": "2 + 2"},
+    )
+    llm = FakeLLM(
+        [
+            Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call]),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 2
+    tool_step = state.trace[0]
+    assert tool_step.decision == call
+    assert tool_step.observation is not None
+    assert tool_step.observation.is_error is False
+    assert tool_step.observation.content == "4"
+    tool_messages = [
+        message for message in state.messages if message.role is MessageRole.TOOL
+    ]
+    assert tool_messages[0].tool_call_id == "call-1"
+
+
+def test_agent_executes_first_tool_and_answers_extra_calls_as_failure() -> None:
+    """多 tool_calls：只执行第一个，其余写成可恢复失败观察并写回消息。"""
+
+    calculator_call = ToolCall(
+        call_id="call-1",
+        name="calculator",
+        arguments={"expression": "2 + 2"},
+    )
+    retrieve_call = ToolCall(
+        call_id="call-2",
+        name="retrieve",
+        arguments={"query": "react"},
+    )
+    llm = FakeLLM(
+        [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[calculator_call, retrieve_call],
+            ),
+            _final_answer_json("完成。"),
+        ]
+    )
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 2
+    first_step = state.trace[0]
+    assert first_step.decision == calculator_call
+    assert first_step.observation is not None
+    assert first_step.observation.is_error is False
+    assert first_step.observation.content == "4"
+
+    tool_messages = [
+        message for message in state.messages if message.role is MessageRole.TOOL
+    ]
+    assert [message.tool_call_id for message in tool_messages] == [
+        "call-1",
+        "call-2",
+    ]
+    assert tool_messages[0].content == "4"
+    assert "后续轮次" in tool_messages[1].content
+    assert state.trace[1].decision == FinalAnswer(content="完成。")
+
+
+def test_agent_passes_registry_tools_to_llm() -> None:
+    """Agent 每轮把注册表工具清单传给 LLM，供适配器生成工具定义。"""
+
+    llm = FakeLLM([_final_answer_json("完成")])
+    registry = _default_registry()
+
+    Agent(llm=llm, registry=registry, max_steps=2).run("任务")
+
+    assert len(llm.calls_with_tools) == 1
+    _, tools = llm.calls_with_tools[0]
+    names = {getattr(tool, "name", None) for tool in tools}
+    assert names == {"calculator", "file_reader", "final_answer", "retrieve"}
+
+
+def test_agent_intercepts_final_answer_tool_call() -> None:
+    """模型用原生 tool_calls 调用 final_answer 时，Agent 转换为最终回答并终止。"""
+
+    call = ToolCall(
+        call_id="call-9",
+        name="final_answer",
+        arguments={"content": "计算完成：4。"},
+    )
+    llm = FakeLLM([Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call])])
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.final_answer == FinalAnswer(content="计算完成：4。")
+    assert state.steps_used == 1
+    assert state.trace[0].decision == FinalAnswer(content="计算完成：4。")
+    tool_messages = [
+        message for message in state.messages if message.role is MessageRole.TOOL
+    ]
+    assert tool_messages[0].tool_call_id == "call-9"
+    assert tool_messages[0].content == "计算完成：4。"

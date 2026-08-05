@@ -44,8 +44,18 @@ class RecordingClient:
         model: str,
         messages: Sequence[Mapping[str, object]],
         stream: bool,
+        tools: list[dict[str, object]] | None,
+        extra_body: dict[str, object] | None,
     ) -> object:
-        self.calls.append({"model": model, "messages": messages, "stream": stream})
+        self.calls.append(
+            {
+                "model": model,
+                "messages": messages,
+                "stream": stream,
+                "tools": tools,
+                "extra_body": extra_body,
+            }
+        )
         if self.error is not None:
             raise self.error
         return self.response
@@ -95,6 +105,8 @@ def test_deepseek_serializes_message_history_and_returns_normal_response() -> No
     request = client.calls[0]
     assert request["model"] == DEFAULT_MODEL
     assert request["stream"] is False
+    assert request["tools"] is None
+    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
     assert request["messages"] == [
         {"role": "system", "content": "你是计算器"},
         {"role": "user", "content": "计算 2 + 2"},
@@ -144,6 +156,47 @@ def test_deepseek_deserializes_tool_call_response_without_executing_it() -> None
     assert result.tool_calls[0].call_id == "call-9"
     assert result.tool_calls[0].name == "calculator"
     assert result.tool_calls[0].arguments == {"expression": "6 * 7"}
+
+
+def test_deepseek_serializes_tool_definitions_and_thinking_disabled() -> None:
+    """传入工具清单时，请求应包含 function 定义与思考模式禁用配置。"""
+
+    class SampleTool:
+        name = "calculator"
+        description = "计算一个算术表达式"
+
+    client = RecordingClient(response=response_message(content="4"))
+    llm = DeepSeekLLM(client=client)
+
+    result = llm.complete(
+        [Message(role=MessageRole.USER, content="计算 2 + 2")],
+        tools=[SampleTool()],
+    )
+
+    assert result == Message(role=MessageRole.ASSISTANT, content="4")
+    request = client.calls[0]
+    assert request["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "calculator",
+                "description": "计算一个算术表达式",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_deepseek_thinking_can_be_enabled_explicitly() -> None:
+    """``thinking_disabled=False`` 时请求不携带禁用配置。"""
+
+    client = RecordingClient(response=response_message(content="4"))
+    llm = DeepSeekLLM(client=client, thinking_disabled=False)
+
+    llm.complete([Message(role=MessageRole.USER, content="测试")])
+
+    assert client.calls[0]["extra_body"] == {}
 
 
 @pytest.mark.parametrize(
