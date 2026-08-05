@@ -136,6 +136,29 @@ def test_observation_preserves_failure_semantics_and_message_link() -> None:
     assert message.tool_call_id == "call-1"
 
 
+def test_repeated_action_error_code_round_trips_through_observation() -> None:
+    """重复动作是稳定错误类别：可以构造失败结果并转成可重试失败观察。"""
+
+    result = ToolResult.failure(
+        tool_call_id="call-1",
+        tool_name="calculator",
+        code=ToolErrorCode.REPEATED_ACTION,
+        message="重复动作：工具 calculator 已调用过",
+        retryable=True,
+    )
+
+    observation = Observation.from_tool_result(result)
+
+    assert result.status is ToolResultStatus.FAILURE
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.REPEATED_ACTION
+    assert result.error.retryable is True
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
+    assert observation.retryable is True
+    assert observation.tool_call_id == "call-1"
+
+
 def test_trace_step_validates_decision_observation_relationship() -> None:
     """工具轨迹必须把观察关联到同一个 ToolCall，最终回答不能执行工具。"""
 

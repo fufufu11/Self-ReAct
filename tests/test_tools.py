@@ -12,6 +12,7 @@ from self_react.models import (
     Observation,
     ToolCall,
     ToolErrorCode,
+    ToolResult,
     ToolResultStatus,
     TraceStep,
 )
@@ -317,6 +318,28 @@ def test_tool_result_round_trips_without_runtime_resources() -> None:
     assert decoded == state
     assert decoded.trace[0].observation is not None
     assert decoded.trace[0].observation.tool_call_id == "call-1"
+
+
+def test_repeated_action_failure_result_keeps_stable_error_code() -> None:
+    """重复动作失败结果携带稳定错误码，供主循环在分派前统一使用。"""
+
+    result = ToolResult.failure(
+        tool_call_id="call-2",
+        tool_name="calculator",
+        code=ToolErrorCode.REPEATED_ACTION,
+        message="重复动作：工具 calculator 已用相同参数调用过",
+        retryable=True,
+    )
+
+    observation = Observation.from_tool_result(result)
+
+    assert result.is_success is False
+    assert result.content is None
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.REPEATED_ACTION
+    assert result.error.retryable is True
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
 
 
 def test_tool_layer_consumes_tool_call_returned_by_fake_llm() -> None:

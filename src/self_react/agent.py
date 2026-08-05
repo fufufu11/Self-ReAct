@@ -1,4 +1,4 @@
-"""ReAct 主循环（Day 12）。
+"""ReAct 主循环（Day 12；Day 14 补充重复动作检测）。
 
 本模块把 Day 5 的 ``LLM``、Day 7 的 ``ToolRegistry``、Day 10 的系统提示词和
 Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上下文请求模型，把模型
@@ -10,7 +10,9 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 运行状态，只保存任务、消息、可用工具名称、步数预算、轨迹和终止信息，不保存
 模型客户端、注册表、密钥或其他不可序列化运行时资源。本模块不实现重试、流式、
 异步、持久化或并行工具调度；``LLM.complete`` 抛出的适配器错误按原样向上传播，
-由调用方决定如何处理。
+由调用方决定如何处理。重复动作（复用 ``call_id`` 或同一工具连续使用相同参数）
+在分派前被拦截，作为带 ``REPEATED_ACTION`` 错误码且可重试的失败观察回写，
+让模型在预算内换一种方式继续。
 """
 
 from __future__ import annotations
@@ -52,6 +54,34 @@ def _summarize_input(state: AgentState) -> str:
         if message.role is MessageRole.TOOL:
             return message.content[:_SUMMARY_LIMIT]
     return state.task[:_SUMMARY_LIMIT]
+
+
+def _repeated_action_reason(decision: ToolCall, state: AgentState) -> str | None:
+    """返回重复动作的稳定说明；没有重复时返回 ``None``。
+
+    识别两种重复形态：``call_id`` 在任意更早步骤中使用过（编号语义在任何
+    位置复用都错误），或者同一工具紧挨着使用完全相同的参数（连续重复才是
+    模型"卡住"的信号）。中间隔了其他动作的相同参数调用属于合法新调用，
+    不会被误判。重复动作在分派前被拦截，不会再次执行工具。
+    """
+
+    for step in state.trace:
+        prior = step.decision
+        if isinstance(prior, ToolCall):
+            if prior.call_id == decision.call_id:
+                return f"重复动作：调用编号 {decision.call_id} 已被使用"
+
+    prior = state.trace[-1].decision if state.trace else None
+    if (
+        isinstance(prior, ToolCall)
+        and prior.name == decision.name
+        and prior.arguments == decision.arguments
+    ):
+        return (
+            f"重复动作：工具 {decision.name} 已用相同参数调用过；"
+            f"如需再次调用请更换参数或使用新编号"
+        )
+    return None
 
 
 def _termination_reason_for(result: ToolResult) -> TerminationReason:
@@ -182,7 +212,17 @@ class Agent:
                 # 的防御分支，正常情况下不可达。
                 raise RuntimeError("parse_decision 返回了未知决策类型")
 
-            result = self._registry.execute(decision)
+            repeated_message = _repeated_action_reason(decision, state)
+            if repeated_message is not None:
+                result = ToolResult.failure(
+                    tool_call_id=decision.call_id,
+                    tool_name=decision.name,
+                    code=ToolErrorCode.REPEATED_ACTION,
+                    message=repeated_message,
+                    retryable=True,
+                )
+            else:
+                result = self._registry.execute(decision)
             observation = Observation.from_tool_result(result)
             messages.append(observation.as_message())
             step = TraceStep(

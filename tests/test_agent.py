@@ -1,8 +1,10 @@
-"""Day 12 Agent 主循环的公开行为测试。
+"""Day 12 Agent 主循环的公开行为测试（Day 14 补充鲁棒性边界）。
 
 测试只依赖 Fake LLM、三个真实工具与一个确定性失败工具，不访问网络、不调用
 真实 API。公开缝是 ``Agent.run(task) -> AgentState``：断言终止原因、轨迹、
 消息上下文和 ``steps_used``/``trace`` 不变量，不触碰 Agent 内部实现。
+Day 14 补充了模型超时/连接失败按原样传播、重复动作（同一 ``call_id`` 复用或
+同一工具连续相同参数）先作为 Observation 回写、预算耗尽兜底等回归测试。
 """
 
 from __future__ import annotations
@@ -13,7 +15,12 @@ from collections.abc import Sequence
 import pytest
 
 from self_react.agent import Agent
-from self_react.llm import LLM, FakeLLM
+from self_react.llm import (
+    LLM,
+    FakeLLM,
+    LLMProviderError,
+    LLMProviderErrorCode,
+)
 from self_react.models import (
     FinalAnswer,
     Message,
@@ -495,6 +502,207 @@ def test_agent_rejects_non_llm_and_non_registry() -> None:
 
     with pytest.raises(TypeError):
         Agent(llm=FakeLLM([]), registry=object(), max_steps=1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (LLMProviderErrorCode.TIMEOUT, "模型请求超时"),
+        (LLMProviderErrorCode.CONNECTION, "无法连接模型服务"),
+    ],
+)
+def test_llm_provider_error_propagates_unchanged(
+    code: LLMProviderErrorCode,
+    message: str,
+) -> None:
+    """模型超时/连接失败按原样向上传播：主循环不重试、不吞掉错误。"""
+
+    class TimeoutLLM:
+        """确定性适配器：每次 complete 都抛稳定供应商错误。"""
+
+        def complete(self, messages: Sequence[Message]) -> Message:
+            raise LLMProviderError(code, message)
+
+    registry = _default_registry()
+    llm = TimeoutLLM()
+    assert isinstance(llm, LLM)
+
+    with pytest.raises(LLMProviderError) as caught:
+        Agent(llm=llm, registry=registry, max_steps=3).run("任务")
+
+    assert caught.value.code is code
+    assert str(caught.value) == message
+    assert caught.value.code is not LLMProviderErrorCode.UNKNOWN
+
+
+def test_repeated_call_id_writes_observation_then_recovery() -> None:
+    """重复动作（复用 call_id）：先作为失败 Observation 回写，模型换新编号后继续。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("我换了一个新编号，结果还是 4。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    repeated_step = state.trace[1]
+    assert isinstance(repeated_step.decision, ToolCall)
+    assert repeated_step.decision.call_id == "call-1"
+    observation = repeated_step.observation
+    assert observation is not None
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
+    assert observation.retryable is True
+    assert "call-1" in observation.content
+    # 重复动作没有执行工具：观察必须由 Agent 在分派前拦截生成
+    tool_messages = [
+        message for message in state.messages if message.role is MessageRole.TOOL
+    ]
+    assert tool_messages[1].tool_call_id == "call-1"
+    assert llm.call_count == 3
+
+
+def test_consecutive_identical_tool_call_is_repeated_action() -> None:
+    """重复动作（同一工具连续相同参数）：写回失败观察，预算内可恢复。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "retrieve", {"query": "python"}),
+            _tool_call_json("call-2", "retrieve", {"query": "python"}),
+            _final_answer_json("同样的查询不需要再执行一次。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("检索 python")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 3
+    repeated_step = state.trace[1]
+    assert isinstance(repeated_step.decision, ToolCall)
+    assert repeated_step.decision.name == "retrieve"
+    observation = repeated_step.observation
+    assert observation is not None
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
+    assert observation.retryable is True
+    assert "retrieve" in observation.content
+
+
+def test_repeated_action_does_not_execute_tool_again() -> None:
+    """重复动作在分派前被拦截：确定性工具不能因为重复调用被再次执行。"""
+
+    class CountingCalculator(CalculatorTool):
+        """带调用计数的计算器，用来断言重复动作没有触达工具层。"""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def execute(self, arguments: dict[str, object]) -> str:
+            self.call_count += 1
+            return super().execute(arguments)
+
+    tool = CountingCalculator()
+    registry = ToolRegistry()
+    registry.register(tool)
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _tool_call_json("call-2", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("重复调用已被拦截。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert tool.call_count == 1
+    assert state.trace[1].observation is not None
+    assert state.trace[1].observation.is_error is True
+    assert state.trace[1].observation.error_code is ToolErrorCode.REPEATED_ACTION
+
+
+def test_repeated_action_then_budget_exhaustion_terminates() -> None:
+    """重复动作后预算耗尽：失败观察仍被记录，终止原因为 MAX_STEPS_EXCEEDED。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "1 + 1"}),
+            _tool_call_json("call-2", "calculator", {"expression": "1 + 1"}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=2).run("算一步")
+
+    assert state.termination_reason is TerminationReason.MAX_STEPS_EXCEEDED
+    assert state.steps_used == 2
+    observation = state.trace[1].observation
+    assert observation is not None
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
+    assert state.messages[-1].role is MessageRole.TOOL
+    assert llm.call_count == 2
+
+
+def test_non_consecutive_identical_tool_call_is_not_repeated() -> None:
+    """中间隔了其他动作的相同调用是合法新调用，不应被误判为重复动作。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "1 + 1"}),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _tool_call_json("call-3", "calculator", {"expression": "1 + 1"}),
+            _final_answer_json("两次计算都执行了。"),
+        ]
+    )
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 4
+    assert all(step.observation is not None for step in state.trace[:3])
+    assert all(
+        step.observation is None or not step.observation.is_error
+        for step in state.trace[:3]
+    )
+    assert state.trace[2].observation is not None
+    assert state.trace[2].observation.content == "2"
+
+
+def test_non_consecutive_call_id_reuse_is_still_repeated() -> None:
+    """call_id 在任何位置复用都是重复动作，不受"连续"限制。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "1 + 1"}),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("我换了新编号继续。"),
+        ]
+    )
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    repeated_step = state.trace[2]
+    assert isinstance(repeated_step.decision, ToolCall)
+    assert repeated_step.decision.call_id == "call-1"
+    observation = repeated_step.observation
+    assert observation is not None
+    assert observation.is_error is True
+    assert observation.error_code is ToolErrorCode.REPEATED_ACTION
+    assert "call-1" in observation.content
 
 
 def test_agent_accepts_any_llm_protocol_adapter() -> None:
