@@ -2,146 +2,199 @@
 
 > 一个面向学习和实习作品集的最小可用 ReAct（Reason + Act）智能体框架。
 
-## 项目目标
+Self-ReAct 用 20 天从零实现了一个单智能体 ReAct 闭环：模型基于当前状态做决策，
+要么调用一个本地工具，要么直接给出最终回答；工具结果作为观察（Observation）
+回写上下文，模型据此进入下一轮决策，直到给出最终回答或触发明确的终止条件。
 
-在 20 天内完成一个可运行、可测试、可演示的 ReAct 框架。重点不在复刻成熟框架的全部功能，而在于亲手理解并实现 Thought（推理）、Action（行动）和 Observation（观察）的循环，以及工具调用、状态管理、错误处理和运行轨迹。
+项目不追求复刻成熟框架的全部功能，而是把每一条边界都做到能讲清楚、能测试：
+`LLM` 接口与供应商解耦，工具注册与错误处理统一，领域模型和轨迹可序列化，
+自动化测试全部离线、确定性、可复现。
 
-完成后，项目应能作为大模型应用开发实习的作品：代码边界清楚、提交历史可读、Issue/PR 有完整上下文，且可以讲清楚每个模块为什么这样设计。
+## 特性
 
-## 目标边界
+- 单智能体 ReAct 主循环：模型决策 -> 工具执行 -> 观察回写 -> 下一轮决策（或终止）。
+- 与供应商解耦的 `LLM` 协议：Fake LLM 与 DeepSeekLLM 可互换，业务代码不依赖具体供应商。
+- 四个确定性本地工具：计算器、受限文件读取、内置知识检索、`final_answer` 特殊工具。
+- Pydantic v2 结构化领域模型与人类可读的中文执行轨迹。
+- 命令行入口：`hello` / `run` / `example`。
+- 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
-### 本期必须完成（MVP）
+## 安装
 
-- Python 实现的单智能体 ReAct 循环。
-- 与模型供应商解耦的 `LLM` 接口；首个实现接入 DeepSeek 的 OpenAI 兼容 API。
-- 工具注册、参数校验、调用与错误返回。
-- 至少三个本地、确定性的工具：计算器、文本文件读取、简单知识检索或天气模拟工具。
-- 结构化的智能体状态与执行轨迹（trace）。
-- 命令行运行入口、单元测试与一份演示说明。
-- GitHub Issue 驱动的开发过程，以及每个 Issue 对应一个 PR。
+需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。在仓库根目录执行：
 
-### 本期明确不做
+```powershell
+uv sync
+```
 
-- 多智能体协作、长期记忆、向量数据库、RAG 平台化、Web 前端、工作流编排器。
-- 生产级鉴权、限流、持久化、分布式执行与完整可观测性平台。
-- 追求复杂提示词或基准榜单成绩。
+安装后即可用 `uv run self-react ...` 调用命令行入口，或通过
+`pyproject.toml` 中的 `[project.scripts]` 使用已安装的 `self-react` 命令。
 
-这些能力可以放进后续迭代。先让一个小而完整的 ReAct 框架真正可靠地跑通。
+## 配置
 
-## 建议技术路线
+运行时只需要一个配置：DeepSeek API Key。代码从进程环境变量
+`DEEPSEEK_API_KEY` 读取密钥（见 [`deepseek.py`](src/self_react/deepseek.py)），
+密钥不会写入领域状态、日志或仓库。
 
-| 领域 | 建议选择 | 原因 |
+```powershell
+# PowerShell：只在当前终端生效
+$env:DEEPSEEK_API_KEY = "sk-你的密钥"
+```
+
+```bash
+# Bash：只在当前终端生效
+export DEEPSEEK_API_KEY="sk-你的密钥"
+```
+
+也可以把密钥放在本地 `.env` 文件（已被 `.gitignore` 忽略，不会提交）。项目
+不会自动加载 `.env`，需要在当前终端手动加载后生效，例如：
+
+```powershell
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^\s*([^#=]+)=(.*)$') {
+        [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process')
+    }
+}
+```
+
+模板见 [`.env.example`](.env.example)：复制为 `.env` 后填入密钥即可。注意
+`hello`、`example` 与 `run --model fake` 都不需要密钥；只有
+`run --model deepseek` 发起真实请求时才读取它。
+
+## 运行
+
+### 验证环境
+
+```powershell
+uv run self-react hello
+```
+
+固定输出 `Hello from Self-ReAct!`，用于验证 uv、打包安装与命令行入口整条链路。
+
+### 执行一次任务（真实模型）
+
+```powershell
+uv run self-react run "计算 2 + 2" --model deepseek --show-trace
+```
+
+`run` 参数：
+
+| 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| 语言与包管理 | Python 3.11+、`uv` 或 `venv` + `pip` | 生态成熟，便于学习 LLM 应用开发。 |
-| 数据模型 | Pydantic | 让消息、动作、工具参数和运行轨迹有清晰校验。 |
-| HTTP/模型调用 | OpenAI Python SDK 或 `httpx` | 首先采用 DeepSeek 的 OpenAI 兼容接口，后续可替换模型服务。 |
-| 测试 | pytest | 适合纯函数、工具与模拟模型的测试。 |
-| 代码质量 | ruff | 格式化与静态检查成本低。 |
-| 配置 | `.env` + 环境变量 | 不把 API Key 提交到仓库。 |
+| `task` | 任务文本（必填） | — |
+| `--model` | `deepseek`（真实 API）或 `fake`（离线确定性演示） | `deepseek` |
+| `--max-steps` | 最大决策步数（正整数） | `5` |
+| `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
 
-第 4 天建议建立以下目录：
+没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
+计算器 -> 检索 -> 最终回答）：
+
+```powershell
+uv run self-react run "演示任务" --model fake --show-trace
+```
+
+### 端到端示例（离线、确定性）
+
+```powershell
+uv run self-react example single-tool
+uv run self-react example multi-tool
+uv run self-react example failure-recovery
+```
+
+三条示例固定展示单工具、多工具、工具失败后恢复三条主线，使用 Fake LLM 与
+确定性工具，不访问网络、不依赖 API Key，相同命令永远得到相同的决策与观察
+（耗时除外）。详细输出见下文[演示记录](#演示记录)。
+
+## 架构简介
+
+核心循环：
 
 ```text
-src/self_react/
-  agent.py          # ReAct 循环编排
-  models.py         # Message、Action、Trace 等数据结构
-  llm.py            # 抽象模型接口及具体适配器
-  prompts.py        # 系统提示词与渲染逻辑
-  tools/
-    base.py         # 工具协议、注册表与调用结果
-    calculator.py
-    file_reader.py
-  parser.py         # 模型输出解析
-  cli.py            # 命令行入口
-tests/
-examples/
-docs/
+任务输入
+  -> 根据当前状态推理/决策
+  -> 解析为"工具动作"或"最终回答"
+  -> 校验并执行工具动作
+  -> 将工具结果转换为观察并写回状态
+  -> 进入下一轮决策，或以明确原因终止
 ```
 
-## 20 天计划
+源码模块（`src/self_react/`）：
 
-每天以 2 至 4 小时为参考。每一天结束时都应有一个可验证的结果；若时间不足，优先保留测试和可运行性，推迟增强功能。
+| 模块 | 职责 |
+| --- | --- |
+| `models.py` | Pydantic 领域模型：`Message`、`ToolCall`、`ToolResult`、`Observation`、`AgentState`、`TraceStep` 等，所有跨边界数据走同一契约 |
+| `llm.py` | `LLM` 协议与确定性 Fake LLM |
+| `deepseek.py` | DeepSeek OpenAI 兼容 Chat Completions 适配器，只做请求/响应转换 |
+| `prompts.py` | 最小系统提示词渲染：任务规则 + 工具清单 + 输出格式契约 |
+| `parser.py` | 把模型 JSON 输出解析成 `FinalAnswer` 或 `ToolCall`，非法输出抛稳定 `ParseError` |
+| `agent.py` | ReAct 主循环：唯一的步数计数与终止判断 |
+| `trace.py` | 把终态渲染成稳定的人类可读中文轨迹 |
+| `cli.py` | `hello` / `run` / `example` 命令入口 |
+| `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |
+| `tools/` | `Tool` 协议、`ToolRegistry`，以及 calculator、file_reader、retrieve、final_answer |
 
-| 天数 | 主题 | 当日完成标准 |
+领域上下文与概念边界见 [`CONTEXT.md`](CONTEXT.md)；核心循环的完整调研与状态图见
+[`docs/architecture/react-loop.md`](docs/architecture/react-loop.md)；每个模块的
+代码导读存放在 `docs/architecture/`。
+
+## 局限性
+
+这是最小 MVP，以下能力本期明确不做（详见
+[项目计划](docs/project-plan.md)）：
+
+- 单智能体、同步、每轮最多执行一个工具；供应商一次返回多个 `tool_calls` 时只执行
+  第一个，其余以可恢复失败观察回写。
+- 无持久化、暂停/恢复、流式、异步或并行工具调度。
+- 知识检索是模块内固定的内置知识库，不是向量数据库或 RAG 平台。
+- 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
+  UTF-8 文本并截断超长内容。
+- 只接入 DeepSeek（OpenAI 兼容接口），默认禁用思考模式（`reasoning_content`），
+  以保证多轮工具调用的请求历史稳定。
+- 无 Web 前端、鉴权、限流、分布式执行与完整可观测性平台。
+
+循环有界：`max_steps` 由 `Agent` 强制执行；解析失败、未知工具、不可恢复的工具
+失败都会以明确的终止原因结束，不会静默吞掉错误。
+
+## 演示记录
+
+### 离线确定性示例（Day 16）
+
+`uv run self-react example ...` 三条命令在 2026-08-05 实测全部以退出码 0 结束，
+最终回答与轨迹结构如下：
+
+| 示例 | 轨迹 | 最终回答 |
 | --- | --- | --- |
-| Day 1 | 定义范围与开发规范 | 阅读本计划；确定 Python 版本、DeepSeek API Key 管理方式；初始化公开 Git 仓库、`.gitignore` 和许可证。 |
-| Day 2 | 理解 ReAct | 阅读 ReAct 论文摘要及两个参考实现；手写一页 Thought-Action-Observation 状态流说明。 |
-| Day 3 | 环境与骨架 | 建立包管理、`src` 目录、pytest、ruff 和最小 `hello` 命令。 |
-| Day 4 | 领域模型 | 定义 `Message`、`ToolCall`、`ToolResult`、`AgentState`、`TraceStep`；完成模型单元测试。 |
-| Day 5 | LLM 抽象 | 实现 `LLM` 协议和假模型（Fake LLM）；让业务代码无需依赖具体供应商。 |
-| Day 6 | 模型适配 | 接入 DeepSeek API；编写真实调用的手动验证脚本，密钥只从环境变量读取。 |
-| Day 7 | 工具接口 | 实现工具基类/协议、工具注册表、参数和异常的统一返回；测试成功与失败调用。 |
-| Day 8 | 第一个工具 | 完成计算器工具，覆盖非法表达式、除零等边界情况。 |
-| Day 9 | 第二、三个工具 | 完成受限文件读取工具及一个确定性检索/模拟工具；禁止工具越过允许目录。 |
-| Day 10 | 提示词与输出格式 | 设计最小系统提示词，要求模型返回结构化动作；明确最终回答和工具调用两种结果。 |
-| Day 11 | 输出解析 | 实现 JSON/结构化输出解析与错误信息；用 Fake LLM 覆盖合法、缺字段、未知工具三类输入。 |
-| Day 12 | ReAct 主循环 | 串起“模型 -> 解析 -> 工具 -> Observation -> 模型”；增加最大步数防止无限循环。 |
-| Day 13 | 状态与轨迹 | 保留每一步输入、动作、观察和耗时；实现人类可读的 trace 输出。 |
-| Day 14 | 鲁棒性 | 处理模型超时、工具异常、解析失败、重复动作和步数耗尽；补齐回归测试。 |
-| Day 15 | 命令行体验 | 提供任务输入、模型配置、最大步数、是否展示轨迹等 CLI 参数。 |
-| Day 16 | 端到端示例 | 编写 2 至 3 个可复现示例：单工具、多工具、工具失败后恢复。 |
-| Day 17 | 对照优秀实现 | 对比 LangChain/LangGraph 的工具调用与状态处理，只吸收一个有明确价值的改进。 |
-| Day 18 | 测试与质量 | 执行完整测试、ruff 检查；补齐关键分支的测试，确保网络依赖可被 Fake LLM 替代。 |
-| Day 19 | 文档与演示 | 完成安装、配置、运行、架构、局限性与演示记录；准备面试时的 3 分钟讲解。 |
-| Day 20 | 发布前复盘 | 从空环境验证安装和示例；清理密钥与临时文件；整理 Issue/PR 链接并打标签或发布版本。 |
+| `single-tool` | calculator -> 最终回答（2 / 2 步） | `2 + 2 = 4。` |
+| `multi-tool` | calculator -> retrieve -> 最终回答（3 / 3 步） | `计算结果是 4；ReAct 是一种让模型推理与行动交错的智能体范式。` |
+| `failure-recovery` | retrieve(unknown-topic) 失败 -> retrieve(react) 成功 -> 最终回答（3 / 3 步） | `第一次检索失败后改用 react，成功找到 ReAct 的说明。` |
 
-## GitHub 开发约定
+失败恢复示例的首次观察带 `TOOL_EXECUTION_ERROR` 错误码与"可重试：是"标记，
+完整人类可读轨迹由 `render_trace` 输出。
 
-从第 3 天开始采用以下节奏：
+### 真实 DeepSeek 手动验收（Day 16）
 
-1. 一个对话窗口只讨论和解决一个 Issue。
-2. 一个 Issue 只承载一个可验收的目标，避免“实现整个框架”这类过大的 Issue。
-3. 每个 Issue 创建独立分支，例如 `feat/issue-4-tool-registry` 或 `fix/issue-11-json-parser`。
-4. 一个 PR 默认只关联一个 Issue，描述中包含问题、方案、验证方式和不做什么。
-5. 合并前至少运行相关 pytest 与 ruff；真实模型调用不作为自动化测试的前置条件。
-6. 本计划文档不对应 Issue；等项目骨架准备完成后再开始创建第一个开发 Issue。
+显式配置 `DEEPSEEK_API_KEY` 后，用真实 DeepSeek（`deepseek-v4-flash`）执行三个
+与示例同构的任务，全部以 `FINAL_ANSWER` 结束：
 
-建议的 Issue 模板字段：目标、验收标准、不在范围内、验证方式。
+| 任务 | 真实工具轨迹 | 步数 | 结果 |
+| --- | --- | --- | --- |
+| 计算 2 + 2 | calculator -> 观察 4 -> 最终回答 | 2 / 5 | `2 + 2 = 4` |
+| 计算 2 + 2，并检索 react 主题 | calculator -> retrieve -> 最终回答 | 3 / 5 | 汇总计算与 ReAct 说明 |
+| 检索 qwerty123，失败就换 react | retrieve(qwerty123) 失败 -> retrieve(react) 成功 -> 最终回答 | 3 / 5 | 说明失败后改用 react 成功 |
 
-建议的 PR 模板字段：`Closes #<issue-number>`、改动、验证、风险与后续工作。
+真实模型调用结果是非确定性的，不作为自动化测试前置条件；离线确定性的
+`self-react example` 三条命令是可复现基准。
 
-## 参考项目与阅读方法
+### 3分钟讲解
 
-参考的目的不是复制代码，而是观察模块边界、错误处理和测试策略。优先读与当前 Issue 直接相关的部分，每次只回答一个具体问题，例如“工具如何注册并被模型选择”。
+面向面试的 3 分钟讲解稿见 [`docs/demo/3-minute-talk.md`](docs/demo/3-minute-talk.md)。
 
-| 项目 | 重点观察 | 使用建议 |
-| --- | --- | --- |
-| [LangChain](https://github.com/langchain-ai/langchain) | Agent、工具抽象、提示词组合、测试组织 | 用于理解经典 ReAct Agent 的最小组成。 |
-| [LangGraph](https://github.com/langchain-ai/langgraph) | 显式状态、循环控制、持久化边界 | 在 Day 12 至 Day 17 对照 ReAct 循环和状态演进。 |
-| [AutoGen](https://github.com/microsoft/autogen) | 模型客户端抽象、工具调用与事件模型 | 用于了解接口解耦方式，不在 MVP 中引入多智能体。 |
-| [Semantic Kernel](https://github.com/microsoft/semantic-kernel) | 插件/函数抽象、参数元数据 | 在设计工具注册表时参考，不照搬其复杂依赖。 |
-| [ReAct 论文实现索引](https://github.com/ysymyth/ReAct) | 论文任务与推理-行动轨迹 | 用于理解原始范式和示例轨迹。 |
+## 文档导航
 
-阅读顺序：先读 ReAct 论文和 `ysymyth/ReAct` 的轨迹示例，再看 LangChain 的单智能体实现，最后用 LangGraph 的显式状态模型反观自己的设计。AutoGen 与 Semantic Kernel 只作为架构参考，避免过早被复杂工程细节分散注意力。
-
-## 每日记录模板
-
-建议在 `docs/daily/` 中按日期记录，格式保持简短：
-
-```markdown
-# Day N：主题
-
-## 今天理解了什么
-
-## 今天交付了什么
-
-## 遇到的问题与解决过程
-
-## 明天要验证什么
-```
-
-这类记录在面试中很有价值：它能展示你不是只会调用框架，也能从问题、假设、实现和验证中迭代。
-
-## 已确定的前提与待决事项
-
-### 已确定
-
-- 首个模型服务：DeepSeek API（采用其 OpenAI 兼容接口）。
-- 每天投入：2 至 4 小时，20 天计划保持不变。
-- 仓库：公开在 GitHub；Day 1 需加入许可证、贡献说明和密钥扫描习惯。
-
-### 待确定
-
-- 最终演示场景：命令行任务助手、研究资料助手，或本地文件分析助手。
-
-演示场景可以在 Day 9 完成工具能力后确定：届时根据已经可靠运行的工具来选，避免为了一个尚未验证的场景过早扩展范围。
+- [项目计划](docs/project-plan.md)：目标、边界、20 天计划、开发约定与 Issue/PR 索引。
+- [CONTEXT.md](CONTEXT.md)：领域上下文与统一术语。
+- [ReAct 核心循环](docs/architecture/react-loop.md)：论文调研与状态图。
+- [每日学习记录](docs/daily/)：每天理解了什么、交付了什么、遇到的问题。
+- [架构导读](docs/architecture/)：每个模块的代码导读。
+- [贡献指南](CONTRIBUTING.md)：开发流程、提交信息与分支规范。
+- [LICENSE](LICENSE)：MIT License。
