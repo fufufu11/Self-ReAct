@@ -7,30 +7,26 @@ CLI 只做参数解析、组装工具注册表与模型适配器、把终态结�
 与 Day 13 的 ``render_trace`` 完全一致。
 
 CLI 默认不要求真实 API Key 即可运行：``--help``、参数校验错误路径和
-``--model fake`` 的确定性演示都不读取 ``DEEPSEEK_API_KEY``；只有真正选择
-``--model deepseek`` 并发起运行时才构造 DeepSeek 适配器，配置缺失会得到
-一行稳定说明与非零退出码，而不是堆栈。自动化测试通过 ``build_llm`` 参数
-注入返回 Fake LLM 的工厂，不访问网络。
+``--model fake`` 的确定性演示都不会读取任何 API Key；只有真正选择
+``--model deepseek`` 或 ``--model openai`` 并发起运行时才构造真实适配器，
+配置缺失会得到一行稳定说明与非零退出码，而不是堆栈。模型适配器由
+``providers`` 注册表按 ``--model`` 选择，新增供应商只需注册 provider，
+不需要改 CLI 分支。自动化测试通过 ``build_llm`` 参数注入返回 Fake LLM
+的工厂，不访问网络。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from typing import Callable
 
 from self_react.agent import Agent
 from self_react.examples import EXAMPLES, run_example
-from self_react.llm import (
-    LLM,
-    FakeLLM,
-    LLMConfigurationError,
-    LLMError,
-    LLMProviderError,
-)
-from self_react.models import Message, MessageRole, TerminationReason
+from self_react.llm import LLM, LLMError, LLMProviderError
+from self_react.models import TerminationReason
+from self_react.providers import available_providers, create_provider
 from self_react.tools import (
     CalculatorTool,
     FileReaderTool,
@@ -46,8 +42,8 @@ HELLO_MESSAGE = "Hello from Self-ReAct!"
 DEFAULT_MAX_STEPS = 5
 """``run`` 子命令的默认最大步数。"""
 
-_MODEL_CHOICES = ("deepseek", "fake")
-"""``--model`` 可选的模型名：真实 DeepSeek 或确定性离线演示。"""
+_MODEL_CHOICES = available_providers()
+"""``--model`` 可选的模型名：来自 provider 注册表（按名称排序）。"""
 
 _TERMINATION_LABELS: dict[TerminationReason, str] = {
     TerminationReason.FINAL_ANSWER: "最终回答",
@@ -59,70 +55,18 @@ _TERMINATION_LABELS: dict[TerminationReason, str] = {
 """CLI 对非最终回答终止原因的中文标签，与 Day 13 渲染层保持一致。"""
 
 
-def _demo_fake_llm() -> FakeLLM:
-    """构造确定性离线演示用 Fake LLM。
-
-    演示任务固定走"计算器 -> 检索 -> 最终回答"三步，与三个真实工具对应，
-    让没有 API Key 的用户也能完整看到"任务 -> 工具 -> 观察 -> 回答"的
-    流水线。相同输入永远得到相同输出，不访问网络、不读取环境变量。
-    """
-
-    return FakeLLM(
-        [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content=json.dumps(
-                    {
-                        "kind": "tool_call",
-                        "call_id": "call-1",
-                        "name": "calculator",
-                        "arguments": {"expression": "2 + 2"},
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-            Message(
-                role=MessageRole.ASSISTANT,
-                content=json.dumps(
-                    {
-                        "kind": "tool_call",
-                        "call_id": "call-2",
-                        "name": "retrieve",
-                        "arguments": {"query": "react"},
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-            Message(
-                role=MessageRole.ASSISTANT,
-                content=json.dumps(
-                    {
-                        "kind": "final_answer",
-                        "content": "计算完成，并查到了 ReAct 的说明。",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        ]
-    )
-
-
 def build_llm(model: str, max_steps: int, task: str) -> LLM:
     """默认模型工厂：把 ``--model`` 变成可用的 LLM 适配器。
 
-    ``deepseek`` 构造 Day 6 的 DeepSeek 适配器（密钥缺失时抛稳定配置错误）；
-    ``fake`` 构造确定性离线演示适配器。工厂在参数校验通过后才被调用，因此
+    委托给 ``providers.create_provider``：按模型名查 provider 注册表并构造
+    适配器（``deepseek`` / ``openai`` 密钥缺失时抛稳定配置错误；``fake``
+    构造确定性离线演示适配器）。工厂在参数校验通过后才被调用，因此
     ``--help`` 与错误路径不会读取 API Key。``max_steps`` 与 ``task`` 保留在
-    签名中，供测试工厂断言 CLI 是否正确传递参数。
+    签名中，供测试工厂断言 CLI 是否正确传递参数；注册的 provider 工厂
+    目前不消费它们。
     """
 
-    if model == "fake":
-        return _demo_fake_llm()
-    if model == "deepseek":
-        from self_react.deepseek import DeepSeekLLM
-
-        return DeepSeekLLM(model="deepseek-v4-flash")
-    raise LLMConfigurationError(f"未知模型：{model}")
+    return create_provider(model)
 
 
 BuildLLM = Callable[[str, int, str], LLM]
@@ -185,7 +129,10 @@ def _create_parser() -> argparse.ArgumentParser:
         "--model",
         choices=_MODEL_CHOICES,
         default="deepseek",
-        help="模型适配器：deepseek（真实 API）或 fake（确定性离线演示）。",
+        help=(
+            "模型适配器：deepseek（真实 DeepSeek API）、"
+            "openai（真实 OpenAI API）或 fake（确定性离线演示）。"
+        ),
     )
     run_parser.add_argument(
         "--max-steps",

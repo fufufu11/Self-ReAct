@@ -234,6 +234,26 @@ def test_run_forwards_model_and_max_steps_to_factory(
     assert captured.out == "最终回答：完成。\n"
 
 
+@pytest.mark.parametrize("model", ["fake", "deepseek", "openai"])
+def test_run_accepts_all_registered_model_choices(
+    model: str,
+    capsys: CaptureFixture[str],
+) -> None:
+    """注册表里的每个模型名都是合法选项，并原样透传给工厂。"""
+
+    factory = RecordingLLMFactory([_final_answer_json("完成。")])
+
+    exit_code = main(
+        ["run", "任务", "--model", model],
+        build_llm=factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert factory.requested_models == [model]
+    assert captured.out == "最终回答：完成。\n"
+
+
 def test_run_without_show_trace_flag_does_not_print_trace(
     capsys: CaptureFixture[str],
 ) -> None:
@@ -315,3 +335,13 @@ def test_build_llm_deepseek_missing_key_raises_configuration_error(
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(LLMConfigurationError):
         build_llm("deepseek", max_steps=5, task="任务")
+
+
+def test_build_llm_openai_missing_key_raises_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_llm("openai", ...)`` 无密钥时抛稳定配置错误。"""
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(LLMConfigurationError):
+        build_llm("openai", max_steps=5, task="任务")

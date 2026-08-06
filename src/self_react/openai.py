@@ -1,10 +1,11 @@
-"""DeepSeek OpenAI 兼容 Chat Completions 的同步 LLM 适配器。
+"""OpenAI 原生 Chat Completions 的同步 LLM 适配器（R-01）。
 
-适配器只负责把领域消息转换成供应商请求，并把一次响应转换回 assistant
-Message；消息、工具定义与响应转换和 OpenAI 适配器共用 ``openai_compat``
-模块，本文件只保留 DeepSeek 特有的默认配置（地址、模型、思考模式开关）
-与客户端构造。适配器不执行 ToolCall、不修改 AgentState、不读取隐藏状态，
-也不在供应商失败时自行重试。测试可以注入一个具有
+适配器只负责把领域消息转换成 OpenAI Chat Completions 请求，并把一次响应
+转换回 assistant Message；消息、工具定义与响应转换和 DeepSeek 适配器共用
+``openai_compat`` 模块，本文件只保留 OpenAI 特有的默认配置与客户端构造。
+适配器不执行 ToolCall、不修改 AgentState、不读取隐藏状态，也不在供应商
+失败时自行重试。默认从 ``OPENAI_API_KEY`` 读取密钥；``base_url``、
+``model``、``timeout`` 均可配置，测试可以注入一个具有
 ``chat.completions.create`` 方法的客户端，因此自动化测试不需要网络或密钥。
 """
 
@@ -12,7 +13,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any
 
 from openai import OpenAI
 
@@ -26,23 +26,21 @@ from self_react.openai_compat import (
     serialize_tools,
 )
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-5.6"
 DEFAULT_TIMEOUT = 30.0
-DEFAULT_THINKING_DISABLED = True
-"""默认禁用 DeepSeek 思考模式。
+"""适配器默认值。
 
-思考模式会在响应里返回 ``reasoning_content``，DeepSeek 要求后续请求原样
-传回它；本项目按 Day 10 契约只保留模型输出的 JSON 决策，无法保证
-``reasoning_content`` 的完整往返，因此默认关闭思考模式，避免多轮工具调用
-被 API 拒绝。
+``DEFAULT_MODEL`` 采用 OpenAI 当前的默认模型别名 ``gpt-5.6``（官方模型
+指南中的最新默认）；模型名始终可通过 ``OpenAILLM(model=...)`` 覆盖，
+不把模型名写进领域状态。
 """
 
 
-class DeepSeekLLM:
-    """使用 OpenAI Python SDK 调用 DeepSeek Chat Completions 的同步适配器。
+class OpenAILLM:
+    """使用 OpenAI Python SDK 调用 OpenAI Chat Completions 的同步适配器。
 
-    默认从 DEEPSEEK_API_KEY 读取密钥，并将客户端最大自动重试次数设为零。
+    默认从 OPENAI_API_KEY 读取密钥，并将客户端最大自动重试次数设为零。
     传入 client 后可以完全替换 SDK 客户端，适合无网络单元测试；注入客户端
     时不要求提供密钥。
     """
@@ -53,7 +51,6 @@ class DeepSeekLLM:
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
-        thinking_disabled: bool = DEFAULT_THINKING_DISABLED,
         client: Client | None = None,
     ) -> None:
         """校验配置并建立客户端；不会把密钥写入领域状态或日志。"""
@@ -72,15 +69,14 @@ class DeepSeekLLM:
         self.model = model
         self.base_url = base_url
         self.timeout = float(timeout)
-        self.thinking_disabled = bool(thinking_disabled)
 
         if client is not None:
             self._client = client
             return
 
-        resolved_key = os.getenv("DEEPSEEK_API_KEY")
+        resolved_key = os.getenv("OPENAI_API_KEY")
         if not isinstance(resolved_key, str) or not resolved_key.strip():
-            raise LLMConfigurationError("缺少 DEEPSEEK_API_KEY")
+            raise LLMConfigurationError("缺少 OPENAI_API_KEY")
         self._client = OpenAI(
             api_key=resolved_key,
             base_url=base_url,
@@ -98,20 +94,17 @@ class DeepSeekLLM:
 
         payload = serialize_messages(messages)
         serialized_tools = serialize_tools(tools) if tools is not None else None
-        extra_body: dict[str, Any] = {}
-        if self.thinking_disabled:
-            extra_body["thinking"] = {"type": "disabled"}
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
                 messages=payload,
                 stream=False,
                 tools=serialized_tools,
-                extra_body=extra_body,
+                extra_body=None,
             )
         except Exception as exc:
             code = provider_error_code(exc)
-            raise LLMProviderError(code, f"DeepSeek 请求失败（{code.value}）") from None
+            raise LLMProviderError(code, f"OpenAI 请求失败（{code.value}）") from None
         return deserialize_response(response)
 
 
@@ -119,5 +112,5 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
-    "DeepSeekLLM",
+    "OpenAILLM",
 ]
