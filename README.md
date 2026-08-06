@@ -13,7 +13,8 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
 ## 特性
 
 - 单智能体 ReAct 主循环：模型决策 -> 工具执行 -> 观察回写 -> 下一轮决策（或终止）。
-- 与供应商解耦的 `LLM` 协议：Fake LLM 与 DeepSeekLLM 可互换，业务代码不依赖具体供应商。
+- 与供应商解耦的 `LLM` 协议：Fake LLM、DeepSeekLLM 与 OpenAILLM 可互换，
+  业务代码不依赖具体供应商。
 - 四个确定性本地工具：计算器、受限文件读取、内置知识检索、`final_answer` 特殊工具。
 - Pydantic v2 结构化领域模型与人类可读的中文执行轨迹。
 - 命令行入口：`hello` / `run` / `example`。
@@ -32,18 +33,22 @@ uv sync
 
 ## 配置
 
-运行时只需要一个配置：DeepSeek API Key。代码从进程环境变量
-`DEEPSEEK_API_KEY` 读取密钥（见 [`deepseek.py`](src/self_react/deepseek.py)），
+运行时按所选模型需要 DeepSeek 或 OpenAI 的 API Key。`run --model deepseek`
+从进程环境变量 `DEEPSEEK_API_KEY` 读取密钥（见
+[`deepseek.py`](src/self_react/deepseek.py)）；`run --model openai` 从
+`OPENAI_API_KEY` 读取密钥（见 [`openai.py`](src/self_react/openai.py)）。
 密钥不会写入领域状态、日志或仓库。
 
 ```powershell
 # PowerShell：只在当前终端生效
 $env:DEEPSEEK_API_KEY = "sk-你的密钥"
+$env:OPENAI_API_KEY = "sk-你的密钥"   # 使用 OpenAI 模型时设置
 ```
 
 ```bash
 # Bash：只在当前终端生效
 export DEEPSEEK_API_KEY="sk-你的密钥"
+export OPENAI_API_KEY="sk-你的密钥"   # 使用 OpenAI 模型时设置
 ```
 
 也可以把密钥放在本地 `.env` 文件（已被 `.gitignore` 忽略，不会提交）。项目
@@ -59,7 +64,8 @@ Get-Content .env | ForEach-Object {
 
 模板见 [`.env.example`](.env.example)：复制为 `.env` 后填入密钥即可。注意
 `hello`、`example` 与 `run --model fake` 都不需要密钥；只有
-`run --model deepseek` 发起真实请求时才读取它。
+`run --model deepseek` / `run --model openai` 发起真实请求时才读取对应的
+API Key。
 
 ## 运行
 
@@ -75,6 +81,7 @@ uv run self-react hello
 
 ```powershell
 uv run self-react run "计算 2 + 2" --model deepseek --show-trace
+uv run self-react run "计算 2 + 2" --model openai --show-trace
 ```
 
 `run` 参数：
@@ -82,7 +89,7 @@ uv run self-react run "计算 2 + 2" --model deepseek --show-trace
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `task` | 任务文本（必填） | — |
-| `--model` | `deepseek`（真实 API）或 `fake`（离线确定性演示） | `deepseek` |
+| `--model` | `deepseek`（真实 DeepSeek API）、`openai`（真实 OpenAI API）或 `fake`（离线确定性演示） | `deepseek` |
 | `--max-steps` | 最大决策步数（正整数） | `5` |
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
 
@@ -124,7 +131,10 @@ uv run self-react example failure-recovery
 | --- | --- |
 | `models.py` | Pydantic 领域模型：`Message`、`ToolCall`、`ToolResult`、`Observation`、`AgentState`、`TraceStep` 等，所有跨边界数据走同一契约 |
 | `llm.py` | `LLM` 协议与确定性 Fake LLM |
-| `deepseek.py` | DeepSeek OpenAI 兼容 Chat Completions 适配器，只做请求/响应转换 |
+| `deepseek.py` | DeepSeek OpenAI 兼容 Chat Completions 适配器，只做请求/响应转换（与 OpenAI 共用转换逻辑） |
+| `openai.py` | OpenAI 原生 Chat Completions 适配器，默认读取 `OPENAI_API_KEY`，`base_url`/`model`/`timeout` 可配置 |
+| `openai_compat.py` | DeepSeek/OpenAI 共用的消息、工具定义与响应转换逻辑 |
+| `providers.py` | 模型 provider 注册表与工厂：按 `--model` 选择适配器，提供注册扩展点 |
 | `prompts.py` | 最小系统提示词渲染：任务规则 + 工具清单 + 输出格式契约 |
 | `parser.py` | 把模型 JSON 输出解析成 `FinalAnswer` 或 `ToolCall`，非法输出抛稳定 `ParseError` |
 | `agent.py` | ReAct 主循环：唯一的步数计数与终止判断 |
@@ -148,8 +158,9 @@ uv run self-react example failure-recovery
 - 知识检索是模块内固定的内置知识库，不是向量数据库或 RAG 平台。
 - 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
   UTF-8 文本并截断超长内容。
-- 只接入 DeepSeek（OpenAI 兼容接口），默认禁用思考模式（`reasoning_content`），
-  以保证多轮工具调用的请求历史稳定。
+- 只接入 DeepSeek 与 OpenAI 两个供应商（均走 OpenAI 兼容 Chat Completions
+  接口）；DeepSeek 默认禁用思考模式（`reasoning_content`），以保证多轮
+  工具调用的请求历史稳定。
 - 无 Web 前端、鉴权、限流、分布式执行与完整可观测性平台。
 
 循环有界：`max_steps` 由 `Agent` 强制执行；解析失败、未知工具、不可恢复的工具
