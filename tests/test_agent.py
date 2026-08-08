@@ -296,33 +296,119 @@ def test_zero_max_steps_terminates_immediately() -> None:
     assert llm.call_count == 0
 
 
-def test_parse_error_records_trace_error_and_terminates() -> None:
-    """解析失败：记录 MODEL_OUTPUT_PARSE_ERROR 轨迹步骤，不伪造决策。"""
+def test_parse_error_retry_once_then_tool_call_and_final_answer() -> None:
+    """解析失败有界重试（重试一次成功）：回写稳定错误、消耗一步，重试成功后走正常工具分支。"""
 
-    llm = FakeLLM([_json_message("这不是 JSON")])
+    llm = FakeLLM(
+        [
+            _json_message("这不是 JSON"),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.final_answer == FinalAnswer(content="结果是 4。")
+    assert state.steps_used == 3
+    assert len(state.trace) == 3
+    assert llm.call_count == 3
+
+    error_step = state.trace[0]
+    assert error_step.decision is None
+    assert error_step.observation is None
+    assert error_step.error is not None
+    assert error_step.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert error_step.error.retryable is True
+    assert "Traceback" not in error_step.error.message
+    assert "这不是 JSON" not in error_step.error.message
+
+    tool_step = state.trace[1]
+    assert isinstance(tool_step.decision, ToolCall)
+    assert tool_step.decision.name == "calculator"
+    assert tool_step.observation is not None
+    assert tool_step.observation.content == "4"
+    assert state.trace[2].decision == FinalAnswer(content="结果是 4。")
+
+    # 重试轮（第二轮模型调用）的消息上下文以稳定错误反馈结尾
+    retry_messages = llm.calls[1]
+    feedback = retry_messages[-1]
+    assert feedback.role is MessageRole.USER
+    assert "你的上一条输出无法解析" in feedback.content
+    assert "这不是 JSON" not in feedback.content
+
+
+def test_parse_error_retry_still_fails_terminates() -> None:
+    """解析失败重试仍失败：第二次失败不再重试，以 MODEL_OUTPUT_PARSE_ERROR 终止。"""
+
+    llm = FakeLLM(
+        [
+            _json_message("这不是 JSON"),
+            _json_message('{"kind": "tool_call"}'),
+        ]
+    )
     registry = _default_registry()
 
     state = Agent(llm=llm, registry=registry, max_steps=3).run("任务")
 
     assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
     assert state.final_answer is None
+    assert state.steps_used == 2
+    assert len(state.trace) == 2
+    assert llm.call_count == 2
+
+    first, second = state.trace
+    assert first.error is not None
+    assert first.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert first.error.retryable is True
+    assert second.error is not None
+    assert second.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert second.error.retryable is False
+    assert second.decision is None
+    assert second.observation is None
+    # 重试仍失败后直接终止，没有第三次模型调用
+    assert state.messages[-1].role is MessageRole.ASSISTANT
+
+
+def test_parse_error_budget_exhausted_terminates_without_retry() -> None:
+    """预算恰好耗尽：解析失败消耗唯一一步后无预算重试，直接以解析失败终止。"""
+
+    llm = FakeLLM([_json_message("这不是 JSON")])
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=1).run("任务")
+
+    assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
+    assert state.final_answer is None
     assert state.steps_used == 1
     assert len(state.trace) == 1
+    assert llm.call_count == 1
     step = state.trace[0]
     assert step.decision is None
     assert step.observation is None
     assert step.error is not None
     assert step.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
     assert step.error.retryable is False
-    assert "Traceback" not in step.error.message
-    assert "这不是 JSON" not in step.error.message
-    assert llm.call_count == 1
+    # 没有预算就不会发起重试，也没有写回错误反馈
+    assert [message.role for message in state.messages] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+    ]
 
 
 def test_parse_error_message_is_stable_and_does_not_leak_raw_output() -> None:
     """解析失败的消息保持稳定，不携带模型原始输出。"""
 
-    llm = FakeLLM([_json_message('{"kind": "final_answer", "content": 123}')])
+    llm = FakeLLM(
+        [
+            _json_message('{"kind": "final_answer", "content": 123}'),
+            _final_answer_json("完成。"),
+        ]
+    )
     registry = _default_registry()
 
     state = Agent(llm=llm, registry=registry, max_steps=2).run("任务")
@@ -331,6 +417,54 @@ def test_parse_error_message_is_stable_and_does_not_leak_raw_output() -> None:
     assert message == "content 必须是字符串"
     assert "123" not in message
     assert "ValidationError" not in message
+
+
+def test_parse_error_feedback_message_is_stable_and_does_not_leak_raw_output() -> None:
+    """错误反馈消息稳定且不泄漏原始输出：原始字符串、数值与异常细节都不出现。"""
+
+    raw = '{"kind": "final_answer", "content": 123}'
+    llm = FakeLLM([_json_message(raw), _final_answer_json("完成。")])
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=2).run("任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    feedback = llm.calls[1][-1]
+    assert feedback.role is MessageRole.USER
+    assert "你的上一条输出无法解析" in feedback.content
+    assert "content 必须是字符串" in feedback.content
+    assert raw not in feedback.content
+    assert "123" not in feedback.content
+    assert "ValidationError" not in feedback.content
+    assert "Traceback" not in feedback.content
+
+
+def test_parse_error_retry_is_at_most_once_per_run() -> None:
+    """一次运行内至多重试一次：重试成功后再次解析失败不再获得重试机会。"""
+
+    llm = FakeLLM(
+        [
+            _json_message("这不是 JSON"),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _json_message("又坏了"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("计算 2 + 2")
+
+    assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
+    assert state.steps_used == 3
+    assert len(state.trace) == 3
+    assert llm.call_count == 3
+
+    second_error = state.trace[2]
+    assert second_error.error is not None
+    assert second_error.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert second_error.error.retryable is False
+    # 第二次解析失败没有触发又一次重试：消息末尾是失败的那条 assistant 消息
+    assert state.messages[-1].role is MessageRole.ASSISTANT
 
 
 def test_unknown_tool_becomes_observation_then_final_answer() -> None:
@@ -462,7 +596,11 @@ def test_input_summary_tracks_task_and_latest_observation() -> None:
             1,
             TerminationReason.MAX_STEPS_EXCEEDED,
         ),
-        ([_json_message("坏输出")], 2, TerminationReason.MODEL_OUTPUT_PARSE_ERROR),
+        (
+            [_json_message("坏输出"), _json_message("坏输出")],
+            2,
+            TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+        ),
     ],
 )
 def test_state_invariants_hold_after_every_run(

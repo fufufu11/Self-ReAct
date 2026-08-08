@@ -3,16 +3,19 @@
 本模块把 Day 5 的 ``LLM``、Day 7 的 ``ToolRegistry``、Day 10 的系统提示词和
 Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上下文请求模型，把模型
 原始输出解析成 ``FinalAnswer`` 或 ``ToolCall``，工具调用交给注册表执行并把
-``ToolResult`` 转成 ``Observation`` 写回上下文，直到给出最终回答、解析失败、
-遇到不可恢复的工具失败或步数预算耗尽。
+``ToolResult`` 转成 ``Observation`` 写回上下文，直到给出最终回答、解析失败
+（至多一次重试后仍失败）、遇到不可恢复的工具失败或步数预算耗尽。
 
 循环控制器（``Agent``）拥有唯一的步数计数与终止判断；``AgentState`` 是唯一
 运行状态，只保存任务、消息、可用工具名称、步数预算、轨迹和终止信息，不保存
-模型客户端、注册表、密钥或其他不可序列化运行时资源。本模块不实现重试、流式、
-异步、持久化或并行工具调度；``LLM.complete`` 抛出的适配器错误按原样向上传播，
-由调用方决定如何处理。重复动作（复用 ``call_id`` 或同一工具连续使用相同参数）
-在分派前被拦截，作为带 ``REPEATED_ACTION`` 错误码且可重试的失败观察回写，
-让模型在预算内换一种方式继续。
+模型客户端、注册表、密钥或其他不可序列化运行时资源。本模块不实现适配器级
+重试、流式、异步、持久化或并行工具调度；``LLM.complete`` 抛出的适配器错误
+按原样向上传播，由调用方决定如何处理。解析失败只做至多一次的有界重试：把
+稳定错误消息回写给模型、消耗一步预算；重试仍失败或预算不足以发起重试时，以
+``MODEL_OUTPUT_PARSE_ERROR`` 终止，杜绝解析重试的无限子循环。重复动作（复用
+``call_id`` 或同一工具连续使用相同参数）在分派前被拦截，作为带
+``REPEATED_ACTION`` 错误码且可重试的失败观察回写，让模型在预算内换一种方式
+继续。
 """
 
 from __future__ import annotations
@@ -93,6 +96,25 @@ def _termination_reason_for(result: ToolResult) -> TerminationReason:
     return TerminationReason.TOOL_EXECUTION_ERROR
 
 
+def _parse_error_feedback(exc: ParseError) -> Message:
+    """构造解析失败时回写给模型的稳定错误反馈消息。
+
+    只复用 ``ParseError`` 的稳定中文说明（``str(exc)``），不泄漏模型原始
+    输出、异常对象或堆栈；引导模型按 Day 10 格式契约重新输出一个 JSON
+    对象，与提示词的输出纪律保持一致。反馈作为 user 角色消息追加到上下文，
+    让重试轮模型能看到失败原因。
+    """
+
+    return Message(
+        role=MessageRole.USER,
+        content=(
+            f"你的上一条输出无法解析：{exc}。请重新输出，只输出一个 "
+            "JSON 对象，kind 只能是 final_answer 或 tool_call，"
+            "不要包含 JSON 以外的文字、解释或代码块标记。"
+        ),
+    )
+
+
 class Agent:
     """拥有唯一步数计数与终止判断的 ReAct 循环控制器。
 
@@ -148,6 +170,7 @@ class Agent:
             trace=[],
         )
 
+        parse_retried = False
         while not state.is_terminated:
             if state.steps_used >= state.max_steps:
                 state = self._rebuild_state(
@@ -209,25 +232,41 @@ class Agent:
                 try:
                     decision = parse_decision(response.content)
                 except ParseError as exc:
+                    # 解析失败有界重试：至多重试一次。第一次失败回写稳定
+                    # 错误消息并消耗一步预算；重试仍失败或预算不足以发起
+                    # 重试时，以 MODEL_OUTPUT_PARSE_ERROR 终止。
+                    retryable = not parse_retried and step_number < state.max_steps
                     step = TraceStep(
                         step_number=step_number,
                         input_summary=input_summary,
                         error=TraceError(
                             code=exc.code,
                             message=str(exc),
-                            retryable=False,
+                            retryable=retryable,
                         ),
                         duration_ms=duration_ms,
                     )
+                    trace = [*state.trace, step]
+                    if not retryable:
+                        state = self._rebuild_state(
+                            task=task,
+                            tool_names=tool_names,
+                            messages=messages,
+                            steps_used=step_number,
+                            trace=trace,
+                            termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+                        )
+                        break
                     state = self._rebuild_state(
                         task=task,
                         tool_names=tool_names,
                         messages=messages,
                         steps_used=step_number,
-                        trace=[*state.trace, step],
-                        termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+                        trace=trace,
                     )
-                    break
+                    messages.append(_parse_error_feedback(exc))
+                    parse_retried = True
+                    continue
 
             if isinstance(decision, FinalAnswer):
                 step = TraceStep(

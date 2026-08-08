@@ -5,6 +5,10 @@
 > - **第 1 步**：认识 `Agent` 的输入输出与四个终止分支；
 > - **第 2 步**：打开代码，按小节顺序逐段读；
 > - **第 3 步**：看测试如何验证，最后回到森林图复查。
+>
+> 更新（R-02，2026-08-08）：解析失败分支从"直接终止"改为"至多一次有界
+> 重试"——回写稳定错误消息、消耗一步预算；重试仍失败或预算耗尽时仍以
+> `MODEL_OUTPUT_PARSE_ERROR` 终止。下文按更新后的行为描述。
 
 ## 0. 先看森林：这一章到底在做什么
 
@@ -40,7 +44,8 @@ flowchart LR
     Reg["ToolRegistry.execute"]
     Obs["Observation 写回消息"]
     EndOk["FINAL_ANSWER<br/>保存 final_answer"]
-    ErrParse["MODEL_OUTPUT_PARSE_ERROR<br/>记录 TraceError"]
+    ErrParse["MODEL_OUTPUT_PARSE_ERROR<br/>重试仍失败/预算耗尽"]
+    Retry["解析失败有界重试<br/>回写稳定错误 + 消耗一步"]
     ErrTool["UNKNOWN_TOOL / TOOL_EXECUTION_ERROR<br/>不可恢复才终止"]
     EndBudget["MAX_STEPS_EXCEEDED"]
     Next["下一轮：回到预算检查"]
@@ -53,7 +58,9 @@ flowchart LR
     Parser -->|"工具调用"| Tool --> Reg --> Obs
     Obs -->|"可恢复失败或成功"| Next
     Obs -->|"不可恢复失败"| ErrTool
-    Parser -->|"ParseError"| ErrParse
+    Parser -->|"ParseError"| Retry
+    Retry -->|"至多一次且预算内"| Next
+    Retry -->|"已重试或预算耗尽"| ErrParse
     Next --> Budget
 ```
 
@@ -73,15 +80,18 @@ flowchart LR
    上下文；
 4. **拆决策**：用 Day 11 的 `parse_decision` 解析 `response.content`；
 5. **分流**：最终回答 -> 正常结束；工具调用 -> 注册表执行 -> 观察写回 ->
-   回到第 2 步；解析失败或不可恢复的工具失败 -> 异常结束。
+   回到第 2 步；解析失败（至多重试一次后仍失败）或不可恢复的工具失败 ->
+   异常结束。
 
 同时，`Agent` **坚决不做**四件事：
 
-- **不重试**：模型调用失败（如 Fake LLM 响应耗尽）按原样向上抛，不偷偷重试；
+- **不无限重试**：模型调用失败（适配器异常）按原样向上抛；解析失败只做
+  至多一次有界重试，绝不形成无限子循环；
 - **不流式、不异步、不持久化**：这些能力留给后续日期；
 - **不修改其他模块**：`LLM.complete` 接口、领域模型、DeepSeek 适配器、提示词、
   解析器和三个工具全部原封不动；
-- **不替模型猜**：解析失败就记录轨迹并终止，不补全、不改写模型输出。
+- **不替模型猜**：解析失败就回写稳定错误并至多重试一次，不补全、不改写
+  模型输出。
 
 ### 0.4 名词小词典（遇到不懂的词回来查）
 
@@ -107,14 +117,14 @@ flowchart LR
 | 终止分支 | `FINAL_ANSWER`、`MODEL_OUTPUT_PARSE_ERROR`、`UNKNOWN_TOOL`/`TOOL_EXECUTION_ERROR`、`MAX_STEPS_EXCEEDED` |
 | 轨迹 | 每轮至少一个 `TraceStep`，含输入摘要、决策/观察/错误、耗时 |
 | 确定性 | 相同 Fake LLM + 相同注册表 + 相同任务 -> 相同终态 |
-| 不做 | 重试、流式、异步、持久化、并行调度、修改其他模块 |
+| 不做 | 流式、异步、持久化、并行调度、修改其他模块；解析失败只做至多一次有界重试 |
 
 ### 1.2 四个终止分支对照表
 
 | 情况 | 记录什么 | 终止原因 |
 | --- | --- | --- |
 | 模型给出最终回答 | `TraceStep(decision=FinalAnswer)`，保存 `final_answer` | `FINAL_ANSWER` |
-| 模型输出无法解析 | `TraceStep(error=TraceError(...))`，`code=MODEL_OUTPUT_PARSE_ERROR` | `MODEL_OUTPUT_PARSE_ERROR` |
+| 模型输出无法解析（至多重试一次） | 首次失败：`TraceStep(error=TraceError(...))` + 回写稳定错误；重试仍失败或预算耗尽：再记一条错误轨迹 | `MODEL_OUTPUT_PARSE_ERROR` |
 | 工具失败且 `retryable=False` | `TraceStep(decision=ToolCall, observation=失败观察)` | `UNKNOWN_TOOL` 或 `TOOL_EXECUTION_ERROR` |
 | 预算耗尽 | 已有轨迹原样保留，不追加伪造步骤 | `MAX_STEPS_EXCEEDED` |
 
@@ -238,30 +248,45 @@ except ParseError as exc:
 Day 11 解析器。`LLM.complete` 只被这里调用一次，`Agent` 绝不因为它抛异常就
 自行重试。
 
-### 2.7 第七站：解析失败分支
+### 2.7 第七站：解析失败分支（有界重试）
 
 ```python
-step = TraceStep(
-    step_number=step_number,
-    input_summary=input_summary,
-    error=TraceError(
-        code=exc.code,
-        message=str(exc),
-        retryable=False,
-    ),
-    duration_ms=duration_ms,
-)
-state = self._rebuild_state(
-    ...
-    termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
-)
-break
+except ParseError as exc:
+    retryable = not parse_retried and step_number < state.max_steps
+    step = TraceStep(
+        step_number=step_number,
+        input_summary=input_summary,
+        error=TraceError(
+            code=exc.code,
+            message=str(exc),
+            retryable=retryable,
+        ),
+        duration_ms=duration_ms,
+    )
+    trace = [*state.trace, step]
+    if not retryable:
+        state = self._rebuild_state(
+            ...
+            trace=trace,
+            termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+        )
+        break
+    state = self._rebuild_state(
+        ...
+        trace=trace,
+    )
+    messages.append(_parse_error_feedback(exc))
+    parse_retried = True
+    continue
 ```
 
 `ParseError.code` 固定是 `TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR`，直接写进
 轨迹错误；`message` 用解析器的稳定中文说明，不携带模型原始输出；`retryable`
-固定 `False`（MVP 默认策略不重试）。`TraceStep` 只带 `error`，`decision` 和
-`observation` 都是 `None`——这就是"不伪造决策"。
+表示"这次失败之后控制器还会不会重试"——第一次失败且预算内为 `True`（下一轮
+就是重试），重试仍失败或预算耗尽为 `False`。`TraceStep` 只带 `error`，
+`decision` 和 `observation` 都是 `None`，这就是"不伪造决策"。重试前把
+`_parse_error_feedback(exc)` 生成的稳定 user 消息追加进上下文，让模型看到
+失败原因；`parse_retried` 保证一次运行内至多重试一次，杜绝无限子循环。
 
 ### 2.8 第八站：最终回答分支
 
@@ -381,11 +406,14 @@ Agent(llm=FakeLLM([...]), registry=三工具注册表, max_steps=3).run("综合�
   TraceStep(decision=FinalAnswer("计算完成并查到了资料。"))
 ```
 
-模型输出 `"这不是 JSON"` 时：
+模型输出 `"这不是 JSON"` 时（有界重试）：
 
 ```text
 第 1 轮：parse_decision 抛 ParseError
-  -> TraceStep(error=TraceError(MODEL_OUTPUT_PARSE_ERROR, ...))
+  -> TraceStep(error=TraceError(MODEL_OUTPUT_PARSE_ERROR, retryable=True))
+  -> 回写稳定错误消息，消耗一步，进入第 2 轮重试
+第 2 轮：模型重新输出仍无法解析
+  -> TraceStep(error=TraceError(MODEL_OUTPUT_PARSE_ERROR, retryable=False))
   -> 终止原因 MODEL_OUTPUT_PARSE_ERROR，不调用任何工具
 ```
 
@@ -401,8 +429,9 @@ Agent(llm=FakeLLM([...]), registry=三工具注册表, max_steps=3).run("综合�
    看到观察，`steps_used == len(trace)`。
 3. **步数耗尽**：`max_steps=2` 只预设 2 条工具响应，断言 `llm.call_count ==
    2`，绝不发起第 3 次模型调用，返回 `MAX_STEPS_EXCEEDED` 与已有轨迹。
-4. **解析失败**：记录 `MODEL_OUTPUT_PARSE_ERROR` 轨迹步骤，`decision` 为
-   `None`，消息不泄漏原始输出。
+4. **解析失败有界重试**：首次失败记录 `MODEL_OUTPUT_PARSE_ERROR` 轨迹步骤
+   并回写稳定错误（`decision` 为 `None`，不泄漏原始输出），重试成功则继续；
+   重试仍失败或预算耗尽才以 `MODEL_OUTPUT_PARSE_ERROR` 终止。
 5. **未知工具与工具失败**：先作为 `Observation`（含错误码与 `retryable`）
    回写，预算内继续到最终回答；预算耗尽则以 `MAX_STEPS_EXCEEDED` 结束。
 6. **不可恢复失败终止**：确定性 `FailingTool` 抛
@@ -450,7 +479,11 @@ sequenceDiagram
             end
         else ParseError
             P-->>C: ParseError
-            C->>C: 记录 MODEL_OUTPUT_PARSE_ERROR 轨迹，终止
+            alt 未重试且预算内
+                C->>C: 回写稳定错误消息，消耗一步，进入重试轮
+            else 已重试或预算耗尽
+                C->>C: 记录 MODEL_OUTPUT_PARSE_ERROR 轨迹，终止
+            end
         end
     end
     C-->>调用方: 终态 AgentState
@@ -462,7 +495,8 @@ sequenceDiagram
 - 终止原因：只在 `run` 的四个分支里写入，其他模块无权修改；
 - 轨迹：每轮由 `run` 追加一个 `TraceStep`，`_rebuild_state` 保证状态一致；
 - 可恢复失败：先写观察继续循环，绝不在工具层直接"判死刑"；
-- 想重试、流式、异步、持久化：都不在本日范围，后续日期再接。
+- 想无限重试、流式、异步、持久化：都不在本日范围，后续日期再接；解析失败
+  只做至多一次的有界重试。
 
 自测题（能答上来就算学会）：
 
@@ -482,7 +516,8 @@ sequenceDiagram
    `llm.call_count == max_steps` 验证这一点。
 3. **因为解析失败意味着没有合法的决策可记。** `TraceStep` 只带
    `error=TraceError(MODEL_OUTPUT_PARSE_ERROR, ...)`，`decision` 和
-   `observation` 都是 `None`，这才是"不伪造决策、不猜测修补"。
+   `observation` 都是 `None`，这才是"不伪造决策、不猜测修补"；有界重试时
+   首次失败的 `retryable=True`，重试仍失败或预算耗尽才终止。
 4. **不会立即终止。** 注册表对未知工具返回 `UNKNOWN_TOOL` 且 `retryable=True`，
    主循环先把它写成 `Observation` 回写，预算内继续；只有预算随后耗尽（得到
    `MAX_STEPS_EXCEEDED`）或失败本身不可恢复时，才成为终止原因。
