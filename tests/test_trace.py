@@ -568,7 +568,7 @@ def test_end_to_end_multi_tool_rounds_render_in_order() -> None:
 def test_end_to_end_parse_error_renders_stable_message() -> None:
     """解析失败端到端：渲染只展示稳定错误说明，不泄漏模型原始输出。"""
 
-    llm = FakeLLM([_json_message("这不是 JSON")])
+    llm = FakeLLM([_json_message("这不是 JSON"), _json_message("坏输出")])
     registry = _default_registry()
 
     state = Agent(llm=llm, registry=registry, max_steps=3).run("任务")
