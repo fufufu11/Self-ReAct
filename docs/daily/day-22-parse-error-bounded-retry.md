@@ -53,7 +53,8 @@ Day 12 的 MVP 对解析失败采用"直接终止"：记录 `MODEL_OUTPUT_PARSE_
   渲染用例，适配有界重试语义；
 - 文档同步：[ReAct 核心循环](../architecture/react-loop.md) 的状态图与
   "模型输出无法解析"章节、[Day 12 代码导读](../architecture/day-12-agent-loop-code-walkthrough.md)
-  的解析失败相关章节，以及本记录。
+  的解析失败相关章节、[Day 22 代码导读](../architecture/day-22-parse-error-bounded-retry-code-walkthrough.md)
+  与本记录。
 
 ## 设计边界与不变量
 
