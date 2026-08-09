@@ -4,7 +4,9 @@ Day 7 只提供最小工具层：``Tool`` 协议描述工具长什么样，``Too
 按精确名称登记工具并把领域 ``ToolCall`` 转换为统一的 ``ToolResult``。
 具体业务工具（计算器、文件读取、天气等）属于 Day 8/9；Agent 主循环属于
 Day 12。本模块不修改 Day 5 的 ``LLM.complete`` 接口，也不执行任何工具
-调用以外的逻辑。
+调用以外的逻辑。Day 23（R-03）起，注册表在业务校验之前按工具声明的参数
+JSON Schema 预校验参数，非法参数在注册表边界以 ``INVALID_ARGUMENTS``
+被拒，工具不会被执行。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from self_react.models import (
     ToolErrorCode,
     ToolResult,
 )
+from self_react.tools.schema import validate_parameters, validate_parameters_schema
 
 DEFAULT_PARAMETERS_SCHEMA: JsonObject = {"type": "object", "properties": {}}
 """工具未声明 ``parameters`` 时 LLM 适配器下发的宽松参数形状。
@@ -58,12 +61,14 @@ class Tool(Protocol):
     """确定性本地工具的最小协议。
 
     ``name`` 是注册表使用的精确名称；``description`` 是后续提示词提供给
-    模型的说明；可选的 ``parameters`` 是描述参数的 JSON Schema 对象（例如
+    模型的说明；可选的 ``parameters`` 是描述参数的 JSON Schema 对象，通常
+    由 ``generate_parameters_schema`` 从参数模型或函数签名自动生成（例如
     ``{"type": "object", "properties": {"query": {"type": "string"}},
-    "required": ["query"], "additionalProperties": False}``），LLM 适配器
-    把它下发给模型以生成合法参数，未声明时使用
-    ``DEFAULT_PARAMETERS_SCHEMA``；``execute`` 接收已由领域模型校验过的
-    参数字典并返回模型可读的字符串内容。工具只做自己的业务，不接触
+    "required": ["query"], "additionalProperties": False}``）。LLM 适配器
+    把它下发给模型以生成合法参数，注册表在分派前按它预校验参数；未声明时
+    使用 ``DEFAULT_PARAMETERS_SCHEMA`` 宽松回退。``execute`` 接收已通过
+    Schema 预校验的参数字典并返回模型可读的字符串内容。工具只做自己的
+    业务，不接触
     ``Message``、``AgentState``、注册表或密钥；失败时抛出
     ``ToolArgumentError`` 或 ``ToolExecutionError``，由注册表统一转换。
 
@@ -104,6 +109,14 @@ class ToolRegistry:
             raise ToolRegistrationError("工具 description 必须是非空字符串")
         if tool.name in self._tools:
             raise ToolRegistrationError(f"工具已注册：{tool.name}")
+        parameters = getattr(tool, "parameters", None)
+        if parameters is not None:
+            try:
+                validate_parameters_schema(parameters)
+            except ValueError as exc:
+                raise ToolRegistrationError(
+                    f"工具 {tool.name} 的 parameters 非法：{exc}"
+                ) from exc
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool | None:
@@ -131,7 +144,9 @@ class ToolRegistry:
         """执行一次领域工具调用并统一转换为 ``ToolResult``。
 
         未知工具返回 ``UNKNOWN_TOOL`` 失败结果，绝不按名称动态导入或执行
-        代码。参数校验失败返回 ``INVALID_ARGUMENTS``；执行异常返回
+        代码。在调用工具之前，先按工具声明的参数 JSON Schema 预校验
+        （R-03）：Schema 非法参数返回 ``INVALID_ARGUMENTS`` 且工具不被
+        执行；业务校验失败同样返回 ``INVALID_ARGUMENTS``；执行异常返回
         ``TOOL_EXECUTION_ERROR``。``KeyboardInterrupt`` 和 ``SystemExit``
         属于系统级控制流，不在这里被吞掉。
         """
@@ -154,6 +169,19 @@ class ToolRegistry:
                     "requested_tool": call.name,
                     "available_tools": list(available),
                 },
+            )
+
+        parameters = getattr(tool, "parameters", None)
+        if parameters is None:
+            parameters = dict(DEFAULT_PARAMETERS_SCHEMA)
+        schema_error = validate_parameters(call.arguments, parameters)
+        if schema_error is not None:
+            return ToolResult.failure(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                code=ToolErrorCode.INVALID_ARGUMENTS,
+                message=f"参数校验失败：{schema_error}",
+                retryable=True,
             )
 
         try:

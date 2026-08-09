@@ -17,6 +17,8 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
   业务代码不依赖具体供应商。
 - 四个确定性本地工具：计算器、受限文件读取、内置知识检索、`final_answer` 特殊工具。
 - Pydantic v2 结构化领域模型与人类可读的中文执行轨迹。
+- 工具参数 Schema 自动生成（Pydantic 参数模型 / 函数签名）与注册表预校验，
+  非法参数在分派前以稳定错误码被拒。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -141,7 +143,7 @@ uv run self-react example failure-recovery
 | `trace.py` | 把终态渲染成稳定的人类可读中文轨迹 |
 | `cli.py` | `hello` / `run` / `example` 命令入口 |
 | `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |
-| `tools/` | `Tool` 协议、`ToolRegistry`，以及 calculator、file_reader、retrieve、final_answer |
+| `tools/` | `Tool` 协议、`ToolRegistry`、参数 Schema 自动生成与预校验，以及 calculator、file_reader、retrieve、final_answer |
 
 领域上下文与概念边界见 [`CONTEXT.md`](CONTEXT.md)；核心循环的完整调研与状态图见
 [`docs/architecture/react-loop.md`](docs/architecture/react-loop.md)；每个模块的

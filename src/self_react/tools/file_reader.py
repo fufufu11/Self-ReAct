@@ -8,7 +8,9 @@
 参数校验失败抛 ``ToolArgumentError``（注册表转 ``INVALID_ARGUMENTS``）；
 根目录缺失、文件不存在、目标不是常规文件、无法解码或读取失败等业务问题
 抛 ``ToolExecutionError``（注册表转 ``TOOL_EXECUTION_ERROR``）。单次最多
-返回 ``MAX_OUTPUT_CHARS`` 个字符，超出部分截断并附加标记。
+返回 ``MAX_OUTPUT_CHARS`` 个字符，超出部分截断并附加标记。Day 23
+（R-03）起，参数 JSON Schema 由 ``FileReaderParameters`` 参数模型自动
+生成，注册表在业务校验之前按 Schema 预校验参数。
 """
 
 from __future__ import annotations
@@ -16,8 +18,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from self_react.models import JsonObject
 from self_react.tools.base import ToolArgumentError, ToolExecutionError
+from self_react.tools.schema import generate_parameters_schema
 
 MAX_PATH_LENGTH = 1_000
 """path 参数的最大字符数，防止超长输入。"""
@@ -37,6 +42,14 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"LPT{i}" for i in range(1, 10)}
 )
 """Windows 保留设备名；打开这些名字会访问系统设备而不是普通文件。"""
+
+
+class FileReaderParameters(BaseModel):
+    """文件读取工具的参数声明（R-03 Schema 自动生成的声明源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(description="允许目录内的相对路径，例如 notes/todo.txt")
 
 
 def _extract_path(arguments: JsonObject) -> str:
@@ -129,17 +142,7 @@ class FileReaderTool:
         "例如 notes/todo.txt；绝对路径、盘符路径和 .. 越界会被拒绝。"
         f"单次最多返回 {MAX_OUTPUT_CHARS} 个字符，超出部分会截断并标注。"
     )
-    parameters: JsonObject = {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "允许目录内的相对路径，例如 notes/todo.txt",
-            },
-        },
-        "required": ["path"],
-        "additionalProperties": False,
-    }
+    parameters: JsonObject = generate_parameters_schema(FileReaderParameters)
 
     def __init__(self, root_directory: str | os.PathLike[str]) -> None:
         """固定允许读取的根目录；该目录是工具的安全边界。"""
@@ -159,6 +162,7 @@ class FileReaderTool:
 
 
 __all__ = [
+    "FileReaderParameters",
     "FileReaderTool",
     "MAX_OUTPUT_CHARS",
     "MAX_PATH_LENGTH",
