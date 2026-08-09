@@ -6,15 +6,20 @@
 
 参数校验失败抛 ``ToolArgumentError``（注册表转 ``INVALID_ARGUMENTS``）；
 输入合规但查不到条目抛 ``ToolExecutionError``（注册表转
-``TOOL_EXECUTION_ERROR``），并允许模型换个说法重试。
+``TOOL_EXECUTION_ERROR``），并允许模型换个说法重试。Day 23（R-03）起，
+参数 JSON Schema 由 ``RetrieveParameters`` 参数模型自动生成，注册表在
+业务校验之前按 Schema 预校验参数。
 """
 
 from __future__ import annotations
 
 import re
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from self_react.models import JsonObject
 from self_react.tools.base import ToolArgumentError, ToolExecutionError
+from self_react.tools.schema import generate_parameters_schema
 
 MAX_QUERY_LENGTH = 200
 """query 参数的最大字符数，防止超长输入。"""
@@ -41,6 +46,16 @@ KNOWLEDGE_BASE: dict[str, str] = {
     ),
 }
 """内置知识库：主题到确定性说明的固定映射。"""
+
+
+class RetrieveParameters(BaseModel):
+    """检索工具的参数声明（R-03 Schema 自动生成的声明源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(
+        description="知识库主题词，例如 react、python、deepseek、uv、pydantic"
+    )
 
 
 def _extract_query(arguments: JsonObject) -> str:
@@ -79,19 +94,7 @@ class RetrieveTool:
         "例如 react、python、deepseek、uv、pydantic；相同输入返回相同结果，"
         "未知主题返回稳定错误。"
     )
-    parameters: JsonObject = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "知识库主题词，例如 react、python、deepseek、uv、pydantic"
-                ),
-            },
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    }
+    parameters: JsonObject = generate_parameters_schema(RetrieveParameters)
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次知识检索并返回主题说明。"""
@@ -110,5 +113,6 @@ class RetrieveTool:
 __all__ = [
     "KNOWLEDGE_BASE",
     "MAX_QUERY_LENGTH",
+    "RetrieveParameters",
     "RetrieveTool",
 ]

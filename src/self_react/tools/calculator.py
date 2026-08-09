@@ -8,7 +8,8 @@
 参数校验失败抛 ``ToolArgumentError``（注册表转 ``INVALID_ARGUMENTS``）；
 除零、结果溢出等运行期失败抛 ``ToolExecutionError``（注册表转
 ``TOOL_EXECUTION_ERROR``）。工具本身不接触 ``Message``、``AgentState``
-或注册表。
+或注册表。Day 23（R-03）起，参数 JSON Schema 由 ``CalculatorParameters``
+参数模型自动生成，注册表在业务校验之前按 Schema 预校验参数。
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ import math
 import operator
 from typing import Callable
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from self_react.models import JsonObject
 from self_react.tools.base import ToolArgumentError, ToolExecutionError
+from self_react.tools.schema import generate_parameters_schema
 
 MAX_EXPRESSION_LENGTH = 1_000
 """表达式字符串的最大字符数，防止超长输入。"""
@@ -48,6 +52,14 @@ _UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[object], object]] = {
     ast.USub: operator.neg,
 }
 """允许的一元运算符白名单。"""
+
+
+class CalculatorParameters(BaseModel):
+    """计算器工具的参数声明（R-03 Schema 自动生成的声明源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expression: str = Field(description="要计算的算术表达式，例如 2 + 2 * 3")
 
 
 def _extract_expression(arguments: JsonObject) -> str:
@@ -193,17 +205,7 @@ class CalculatorTool:
     description = (
         "计算一个算术表达式，例如 2 + 2 * 3。支持加、减、乘、除、整除、取模、幂和括号。"
     )
-    parameters: JsonObject = {
-        "type": "object",
-        "properties": {
-            "expression": {
-                "type": "string",
-                "description": "要计算的算术表达式，例如 2 + 2 * 3",
-            },
-        },
-        "required": ["expression"],
-        "additionalProperties": False,
-    }
+    parameters: JsonObject = generate_parameters_schema(CalculatorParameters)
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次计算器调用并返回结果字符串。"""
@@ -216,6 +218,7 @@ class CalculatorTool:
 
 __all__ = [
     "CalculatorTool",
+    "CalculatorParameters",
     "MAX_ABS_INT",
     "MAX_AST_DEPTH",
     "MAX_EXPRESSION_LENGTH",

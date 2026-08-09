@@ -4,12 +4,24 @@ DeepSeek 原生工具调用模式下，模型可能把提示词中的 ``final_an
 一个可调用的工具。为了让真实模型稳定结束对话，本项目把 ``final_answer``
 注册为特殊工具：它不代表外部动作，Agent 在分派前拦截并把调用转换为
 ``FinalAnswer`` 决策。工具本身提供 ``execute`` 以满足 ``Tool`` 协议，
-但正常流程中不会被注册表真正执行。
+但正常流程中不会被注册表真正执行。Day 23（R-03）起，参数 JSON Schema
+由 ``FinalAnswerParameters`` 参数模型自动生成。
 """
 
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from self_react.models import JsonObject
+from self_react.tools.schema import generate_parameters_schema
+
+
+class FinalAnswerParameters(BaseModel):
+    """最终回答工具的参数声明（R-03 Schema 自动生成的声明源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description="给用户的最终回答文本")
 
 
 class FinalAnswerTool:
@@ -20,17 +32,7 @@ class FinalAnswerTool:
         "任务完成时使用本工具结束对话并交付最终回答。"
         "参数 content 是给用户的最终回答文本。"
     )
-    parameters: JsonObject = {
-        "type": "object",
-        "properties": {
-            "content": {
-                "type": "string",
-                "description": "给用户的最终回答文本",
-            },
-        },
-        "required": ["content"],
-        "additionalProperties": False,
-    }
+    parameters: JsonObject = generate_parameters_schema(FinalAnswerParameters)
 
     def execute(self, arguments: JsonObject) -> str:
         """返回最终回答文本；Agent 会在分派前拦截本工具。"""
@@ -41,4 +43,4 @@ class FinalAnswerTool:
         return content
 
 
-__all__ = ["FinalAnswerTool"]
+__all__ = ["FinalAnswerParameters", "FinalAnswerTool"]

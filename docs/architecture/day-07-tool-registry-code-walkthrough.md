@@ -53,7 +53,7 @@ flowchart LR
 `ToolCall` 变成 `ToolResult`。左边和右下是已经存在的模块，只是用来展示
 未来的消费位置。
 
-### 0.3 一句话预告：注册表只做三件事
+### 0.3 一句话预告：注册表只做三件事（Day 23 起多一道 Schema 安检）
 
 一次 `execute` 调用只做三件事：
 
@@ -62,6 +62,11 @@ flowchart LR
    `ToolResult`；
 3. **守边界**：系统级取消或退出（`KeyboardInterrupt`、`SystemExit`）
    继续向上传播，不吞掉。
+
+Day 23（R-03）在这三步之间多了一道**安检**：找到工具后、执行之前，先按
+工具声明的参数 JSON Schema 预校验 `call.arguments`，非法参数在注册表
+边界以 `INVALID_ARGUMENTS` 被拒，工具根本不会被调用。详见
+[第 6 节](#6-day-23-增补r-03schema-预校验)。
 
 同时，工具层**坚决不做**三件事：
 
@@ -116,7 +121,7 @@ class Tool(Protocol):
 | 方法/属性 | 行为 |
 | --- | --- |
 | `register(tool)` | 检查合同和名称，登记进字典；重复或空名称当场拒绝 |
-| `execute(call)` | 唯一执行大门：`ToolCall` 进，`ToolResult` 出 |
+| `execute(call)` | 唯一执行大门：`ToolCall` 进，`ToolResult` 出；Day 23 起先按参数 Schema 预校验，非法参数以 `INVALID_ARGUMENTS` 被拒 |
 | `get(name)` / `names` / `in` | 只读查询，方便外部了解有哪些工具 |
 
 字典查找就是"精确名称查找"的全部实现：`call.name` 不匹配任何键就返回
@@ -278,13 +283,39 @@ def execute(self, call: ToolCall) -> ToolResult:
    来自领域模型"。
 2. **查不到就写回执**：`dict.get` 找不到时，返回 `UNKNOWN_TOOL` 失败结果，
    消息里同时写清"你请求了谁"和"名册上都有谁"，方便模型下一轮纠正。
-3. **异常按类别分流**：`ToolArgumentError` 的说明原样给模型（那是工具作者
+3. **先按 Schema 安检再执行**（Day 23 增补）：找到工具后，读取工具声明的
+   `parameters`（未声明时回退到宽松对象），用
+   `schema.validate_parameters` 预校验参数字典；不合规直接返回
+   `INVALID_ARGUMENTS` 失败结果，`execute` 根本不会被调用。
+4. **异常按类别分流**：`ToolArgumentError` 的说明原样给模型（那是工具作者
    写好的安全文本）；`ToolExecutionError` 保留工具自己的说明和
    `retryable`；其他 `Exception` 一律换成稳定消息 `工具执行失败：xxx`，
    不把原始异常文本漏出去。
-4. **系统级退出天然不被吞**：`KeyboardInterrupt` 和 `SystemExit` 继承自
+5. **系统级退出天然不被吞**：`KeyboardInterrupt` 和 `SystemExit` 继承自
    `BaseException`，`except Exception` 根本接不到它们，所以它们会继续
    向上传播——这正是我们想要的行为，代码里不需要特殊处理。
+
+Day 23 起 `execute` 的前半段（找到工具之后）变成：
+
+```python
+parameters = getattr(tool, "parameters", None)
+if parameters is None:
+    parameters = dict(DEFAULT_PARAMETERS_SCHEMA)
+schema_error = validate_parameters(call.arguments, parameters)
+if schema_error is not None:
+    return ToolResult.failure(
+        tool_call_id=call.call_id,
+        tool_name=call.name,
+        code=ToolErrorCode.INVALID_ARGUMENTS,
+        message=f"参数校验失败：{schema_error}",
+        retryable=True,
+    )
+```
+
+`validate_parameters` 是项目内的最小 JSON Schema 子集校验器（不引入
+`jsonschema` 依赖），返回第一个稳定中文错误消息；只有通过安检的参数才会
+进入业务 `execute`。这样"参数结构"由 Schema 负责，"业务语义"（表达式
+语法、路径是否越界、主题是否存在）仍由工具自己负责，两层分工不重叠。
 
 ### 2.5 错误分流图（`execute` 的路由）
 
@@ -294,13 +325,18 @@ flowchart TD
     Gate -- "否" --> TypeErr["TypeError 直接抛出"]
     Gate -- "是" --> Lookup{"注册表里有这个名字？"}
     Lookup -- "否" --> Unknown["UNKNOWN_TOOL<br/>retryable=True<br/>消息带可用工具列表"]
-    Lookup -- "是" --> Run["tool.execute(arguments)"]
+    Lookup -- "是" --> Schema{"参数通过<br/>Schema 预校验？"}
+    Schema -- "否" --> Args["INVALID_ARGUMENTS<br/>retryable=True<br/>工具不被执行"]
+    Schema -- "是" --> Run["tool.execute(arguments)"]
     Run -- "返回字符串" --> OK["成功 ToolResult"]
-    Run -- "ToolArgumentError" --> Args["INVALID_ARGUMENTS<br/>retryable=True"]
+    Run -- "ToolArgumentError" --> Args2["INVALID_ARGUMENTS<br/>retryable=True"]
     Run -- "ToolExecutionError" --> Exec["TOOL_EXECUTION_ERROR<br/>保留工具消息和 retryable"]
     Run -- "其他 Exception" --> Generic["TOOL_EXECUTION_ERROR<br/>稳定消息，retryable=True"]
     Run -- "KeyboardInterrupt / SystemExit" --> Up["向上传播，不吞掉"]
 ```
+
+（Day 23 增补：`Schema` 分支是注册表新增的安检；`Args` 与 `Args2` 都输出
+`INVALID_ARGUMENTS`，但前者发生在执行前、后者发生在业务校验失败时。）
 
 ### 2.6 公共出口（`__init__.py`）
 
@@ -428,3 +464,29 @@ Day 12 的 Agent 主循环将按今天的调用边界消费 `ToolCall`：拿到�
 assistant 消息后调用 `registry.execute`，把 `ToolResult` 转成
 `Observation` 和 `tool` 消息，再拼回上下文请求下一轮。整个过程中工具层
 和 LLM 层互不认识，它们只通过领域对象通信。
+
+## 6. Day 23 增补（R-03）：Schema 预校验
+
+R-03 把工具参数从"手写字典"升级为"声明即校验"，注册表在这一步多做了
+两件小事：
+
+1. **注册时检查声明**：`register` 会先检查工具声明的 `parameters` 是否为
+   可用的参数 JSON Schema（JSON 对象、可序列化、`type` 为 `object`、
+   `properties`/`required` 形状正确），非法声明在注册时就以
+   `ToolRegistrationError` 被拒，不让坏 Schema 混进名册；
+2. **执行前预校验**：`execute` 在调用工具之前按 Schema 拒绝非法参数，
+   返回 `INVALID_ARGUMENTS` 且工具不被执行；未声明 Schema 的工具回退到
+   宽松对象，行为与 Day 7 完全一致。
+
+Schema 的来源也从手写改为自动生成：四个业务工具各自声明一个扁平的
+Pydantic 参数模型，`generate_parameters_schema` 调用 Pydantic v2 内置
+`model_json_schema()` 生成（对普通函数提供 `inspect.signature` 轻量
+转换），生成结果与 Day 17 的手写 Schema 等价，由测试钉死。
+
+新增的交叉测试同时验证"Schema 与业务校验一致"（Day 18 记录的候选缺口）：
+Schema 声明的属性与 `required` 和业务校验读取的键完全一致；结构非法参数
+（缺必需、类型错、多余键）在注册表边界与业务层都会被拒；通过 Schema 的
+参数会进入业务层，表达式语法、未知主题等语义规则仍由工具兜底。
+
+完整实现说明见
+[Day 23 代码导读](day-23-tool-schema-generation-code-walkthrough.md)。
