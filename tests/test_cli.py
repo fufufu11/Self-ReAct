@@ -23,6 +23,7 @@ from self_react.llm import (
     LLMProviderError,
     LLMProviderErrorCode,
 )
+from self_react.memory import SUMMARY_HEADING
 from self_react.models import Message, MessageRole
 
 
@@ -345,3 +346,67 @@ def test_build_llm_openai_missing_key_raises_configuration_error(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(LLMConfigurationError):
         build_llm("openai", max_steps=5, task="任务")
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "abc"])
+def test_run_rejects_invalid_context_window(
+    value: str,
+    capsys: CaptureFixture[str],
+) -> None:
+    """``--context-window`` 必须是正整数；零、负数、浮点与非数字被拒绝。"""
+
+    with pytest.raises(SystemExit) as caught:
+        main(["run", "任务", "--context-window", value])
+
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert "context-window" in captured.err
+
+
+def test_run_with_small_context_window_trims_request_and_keeps_result(
+    capsys: CaptureFixture[str],
+) -> None:
+    """CLI 传入小窗口时模型请求出现摘要 system 消息，最终回答不受影响。"""
+
+    factory = RecordingLLMFactory(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _final_answer_json("计算完成，并查到了 ReAct 的说明。"),
+        ]
+    )
+
+    exit_code = main(
+        ["run", "计算 2 + 2，并检索 react", "--context-window", "50"],
+        build_llm=factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "最终回答：计算完成，并查到了 ReAct 的说明。\n"
+    assert factory.created is not None
+    summary_calls = [
+        call
+        for call in factory.created.calls
+        if len(call) >= 2
+        and call[1].role is MessageRole.SYSTEM
+        and SUMMARY_HEADING in call[1].content
+    ]
+    assert summary_calls
+
+
+def test_run_default_context_window_keeps_short_context_unchanged(
+    capsys: CaptureFixture[str],
+) -> None:
+    """默认 20,000 字符窗口下，短任务请求不含摘要（既有行为不变）。"""
+
+    factory = RecordingLLMFactory([_final_answer_json("完成。")])
+
+    exit_code = main(["run", "任务"], build_llm=factory)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "最终回答：完成。\n"
+    assert factory.created is not None
+    for call in factory.created.calls:
+        assert not any(SUMMARY_HEADING in message.content for message in call)

@@ -19,6 +19,8 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
 - Pydantic v2 结构化领域模型与人类可读的中文执行轨迹。
 - 工具参数 Schema 自动生成（Pydantic 参数模型 / 函数签名）与注册表预校验，
   非法参数在分派前以稳定错误码被拒。
+- 短程会话记忆：超过 `--context-window` 字符预算时，自动按整轮裁剪旧历史
+  并回填规则式摘要（Claude auto-compact 风格），默认 20,000 字符。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -93,6 +95,7 @@ uv run self-react run "计算 2 + 2" --model openai --show-trace
 | `task` | 任务文本（必填） | — |
 | `--model` | `deepseek`（真实 DeepSeek API）、`openai`（真实 OpenAI API）或 `fake`（离线确定性演示） | `deepseek` |
 | `--max-steps` | 最大决策步数（正整数） | `5` |
+| `--context-window` | 上下文窗口（字符数，正整数）；超过后自动按整轮裁剪旧历史并回填规则式摘要 | `20000` |
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
 
 没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
@@ -140,6 +143,7 @@ uv run self-react example failure-recovery
 | `prompts.py` | 最小系统提示词渲染：任务规则 + 工具清单 + 输出格式契约 |
 | `parser.py` | 把模型 JSON 输出解析成 `FinalAnswer` 或 `ToolCall`，非法输出抛稳定 `ParseError` |
 | `agent.py` | ReAct 主循环：唯一的步数计数与终止判断 |
+| `memory.py` | 短程会话记忆：`ContextPolicy` 按字符窗口整轮裁剪消息并回填规则式摘要，纯函数、离线确定 |
 | `trace.py` | 把终态渲染成稳定的人类可读中文轨迹 |
 | `cli.py` | `hello` / `run` / `example` 命令入口 |
 | `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |

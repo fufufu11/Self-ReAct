@@ -21,6 +21,7 @@ from self_react.llm import (
     LLMProviderError,
     LLMProviderErrorCode,
 )
+from self_react.memory import SUMMARY_HEADING, ContextPolicy
 from self_react.models import (
     FinalAnswer,
     Message,
@@ -996,3 +997,94 @@ def test_agent_intercepts_final_answer_tool_call() -> None:
     ]
     assert tool_messages[0].tool_call_id == "call-9"
     assert tool_messages[0].content == "计算完成：4。"
+
+
+def test_agent_rejects_non_context_policy() -> None:
+    """``context_policy`` 必须是 ContextPolicy，其他值在构造时被拒绝。"""
+
+    llm = FakeLLM([_final_answer_json("完成")])
+    with pytest.raises(TypeError, match="context_policy"):
+        Agent(
+            llm=llm,
+            registry=ToolRegistry(),
+            max_steps=1,
+            context_policy=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_agent_without_context_policy_sends_full_messages() -> None:
+    """不传策略时模型请求与完整消息列表一致（恒等，既有行为不变）。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("计算 2 + 2")
+
+    second_call = llm.calls[1]
+    assert [message.role for message in second_call] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert second_call == tuple(state.messages[:-1])
+
+
+def test_agent_with_context_policy_trims_request_keeps_state_full() -> None:
+    """传入 ContextPolicy 后模型请求被裁剪+摘要，终态消息仍完整。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _final_answer_json("计算完成，并查到了资料。"),
+        ]
+    )
+    registry = _default_registry()
+
+    state = Agent(
+        llm=llm,
+        registry=registry,
+        max_steps=5,
+        context_policy=ContextPolicy(context_window=80),
+    ).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 3
+    assert state.steps_used == len(state.trace)
+
+    # 首轮请求（system + 任务，无可裁轮次）原样
+    first_call = llm.calls[0]
+    assert [message.role for message in first_call] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+    ]
+
+    # 第二轮起模型请求出现摘要 system 消息
+    second_call = llm.calls[1]
+    assert second_call[0].role is MessageRole.SYSTEM
+    assert second_call[1].role is MessageRole.SYSTEM
+    assert SUMMARY_HEADING in second_call[1].content
+    assert second_call[2].role is MessageRole.USER
+    assert all(
+        message.role is not MessageRole.TOOL or message.tool_call_id != "call-1"
+        for message in second_call
+    )
+
+    # 终态消息保持完整：system + 任务 + 三轮（含被裁掉的第一轮）
+    assert [message.role for message in state.messages] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+    ]
+    assert all(SUMMARY_HEADING not in message.content for message in state.messages)

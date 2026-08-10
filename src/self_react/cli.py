@@ -25,6 +25,7 @@ from typing import Callable
 from self_react.agent import Agent
 from self_react.examples import EXAMPLES, run_example
 from self_react.llm import LLM, LLMError, LLMProviderError
+from self_react.memory import DEFAULT_CONTEXT_WINDOW, ContextPolicy
 from self_react.models import TerminationReason
 from self_react.providers import available_providers, create_provider
 from self_react.tools import (
@@ -142,6 +143,16 @@ def _create_parser() -> argparse.ArgumentParser:
         help="最大决策步数（正整数），默认 5。",
     )
     run_parser.add_argument(
+        "--context-window",
+        type=_positive_int,
+        default=DEFAULT_CONTEXT_WINDOW,
+        metavar="N",
+        help=(
+            "上下文窗口（字符数，正整数），默认 20000；超过后自动按整轮"
+            "裁剪旧历史并回填规则式摘要（Claude auto-compact 风格）。"
+        ),
+    )
+    run_parser.add_argument(
         "--show-trace",
         dest="show_trace",
         action=argparse.BooleanOptionalAction,
@@ -174,7 +185,12 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
         return 2
 
     registry = _build_registry()
-    agent = Agent(llm=llm, registry=registry, max_steps=arguments.max_steps)
+    agent = Agent(
+        llm=llm,
+        registry=registry,
+        max_steps=arguments.max_steps,
+        context_policy=ContextPolicy(context_window=arguments.context_window),
+    )
     try:
         state = agent.run(arguments.task)
     except LLMProviderError as exc:

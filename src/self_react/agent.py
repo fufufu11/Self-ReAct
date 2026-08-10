@@ -24,6 +24,7 @@ import time
 from collections.abc import Sequence
 
 from self_react.llm import LLM
+from self_react.memory import ContextPolicy
 from self_react.models import (
     AgentState,
     FinalAnswer,
@@ -129,8 +130,9 @@ class Agent:
         registry: ToolRegistry,
         *,
         max_steps: int,
+        context_policy: ContextPolicy | None = None,
     ) -> None:
-        """校验并保存循环依赖与步数预算。"""
+        """校验并保存循环依赖、步数预算与可选的上下文策略。"""
 
         if not isinstance(llm, LLM):
             raise TypeError("llm 必须满足 LLM 协议")
@@ -140,10 +142,13 @@ class Agent:
             raise ValueError("max_steps 必须是非负整数")
         if max_steps < 0:
             raise ValueError("max_steps 必须是非负整数")
+        if context_policy is not None and not isinstance(context_policy, ContextPolicy):
+            raise TypeError("context_policy 必须是 ContextPolicy")
 
         self._llm = llm
         self._registry = registry
         self._max_steps = max_steps
+        self._context_policy = context_policy
 
     def run(self, task: str) -> AgentState:
         """执行一次 ReAct 运行，并返回终态 ``AgentState``。"""
@@ -186,7 +191,12 @@ class Agent:
             step_number = state.steps_used + 1
             input_summary = _summarize_input(state)
             started = time.perf_counter()
-            response = self._llm.complete(messages, tools=tools)
+            request_messages = (
+                messages
+                if self._context_policy is None
+                else self._context_policy.prepare(messages)
+            )
+            response = self._llm.complete(request_messages, tools=tools)
             duration_ms = (time.perf_counter() - started) * 1_000.0
             messages.append(response)
 
