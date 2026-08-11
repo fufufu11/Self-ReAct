@@ -412,10 +412,10 @@ def test_run_default_context_window_keeps_short_context_unchanged(
         assert not any(SUMMARY_HEADING in message.content for message in call)
 
 
-def test_run_stream_prints_steps_then_final_answer(
+def test_run_stream_prints_only_final_answer(
     capsys: CaptureFixture[str],
 ) -> None:
-    """--stream 逐行先打印每一步（决策/观察），最后打印最终答案，不输出原始 JSON。"""
+    """--stream 只输出最终回答文本：不打印步骤、决策/观察或原始 JSON。"""
 
     exit_code = main(
         ["run", "计算 2 + 2，并检索 react", "--stream"],
@@ -425,16 +425,11 @@ def test_run_stream_prints_steps_then_final_answer(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.err == ""
-    text = captured.out
-    assert text.index("第 1 步") < text.index("第 2 步") < text.index("第 3 步")
-    assert text.index("决策：调用工具 calculator") < text.index(
-        "决策：调用工具 retrieve"
-    )
-    assert "观察（成功）：" in text
-    assert text.index("最终回答：计算完成，并查到了 ReAct 的说明。") > text.index(
-        "第 3 步"
-    )
-    assert '{"kind"' not in text
+    assert captured.out == "计算完成，并查到了 ReAct 的说明。\n"
+    assert "第 1 步" not in captured.out
+    assert "决策：" not in captured.out
+    assert "观察：" not in captured.out
+    assert '{"kind"' not in captured.out
 
 
 def test_run_stream_with_show_trace_prints_full_trace(
@@ -449,6 +444,7 @@ def test_run_stream_with_show_trace_prints_full_trace(
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    assert captured.out.startswith("计算完成，并查到了 ReAct 的说明。\n\n")
     assert "任务：计算 2 + 2" in captured.out
     assert "终止原因：最终回答（FINAL_ANSWER）" in captured.out
     assert "步数：3 / 5" in captured.out

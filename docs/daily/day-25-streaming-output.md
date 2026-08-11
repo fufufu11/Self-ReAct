@@ -72,3 +72,16 @@
 - 提交 PR（`Closes #55`）、合并后同步本地 main；
 - 按真实结果重写 `docs/handoff/next-session.md`（保持未跟踪）；
 - M2（v0.3.0）打标签发布作为待定事项留给后续对话。
+
+## 收尾调整：`--stream` 只输出最终回答（2026-08-11）
+
+按用户要求调整 CLI 展示语义（Issue #57）：`--stream` 不再打印逐步
+决策/工具调用/观察，只输出最终回答文本；内部仍走 `complete_stream`
+真流式。`--show-trace` 保持独立，显式传入时仍打印完整轨迹。
+
+- 改动仅在 `cli.py`：去掉 `on_step` 回调与 `_print_stream_step`，流式模式
+  最终回答只 `print(content)`；
+- 全量 pytest 508 通过 / 3 跳过；ruff 检查与格式检查通过；三条 `example`
+  输出不变；
+- 真实 DeepSeek 手动验收：`uv run self-react run "计算 2 + 2" --model deepseek --stream`
+  输出仅 `2 + 2 = 4`，退出码 0。

@@ -22,7 +22,7 @@ CLI 只能等全部跑完再打印结果。R-05 让模型调用变成"边吐边�
 2. **流式只是换一种取回方式**：`complete_stream` 增量组装出的
    `Message` 与 `complete` 完全等价，决策、轨迹、终止原因全部不变；
 3. **展示与结果解耦**：`StreamChunk` 只负责"增量文本 + 已组装的工具调用"，
-   CLI 用 `on_step` 回调把每一步的可读文本即时打印出来；
+   CLI `--stream` 只输出最终回答文本，完整过程由 `--show-trace` 提供；
 4. **确定性可测**：Fake LLM 按固定块大小切分内容，相同输入永远得到相同
    块序列；适配器用注入客户端测试，不访问网络。
 
@@ -37,7 +37,6 @@ flowchart LR
     Fake["FakeLLM 固定块切分"]
     Acc["StreamAccumulator 增量组装"]
     Collect["collect_stream -> Message"]
-    Step["render_step 逐步打印"]
     Trace["render_trace 完整轨迹"]
 
     CLI --> Agent
@@ -48,7 +47,6 @@ flowchart LR
     Fake --> Acc
     Acc --> Collect
     Collect --> Agent
-    Agent --> Step
     CLI --> Trace
 ```
 
@@ -250,18 +248,24 @@ assistant 消息；否则下一轮请求会被拒绝（DeepSeek 流式实测返�
 `trace.py` 把 `_render_step` 改名为公开的 `render_step`；`render_trace`
 内部复用它，因此流式展示与完整轨迹天然共用同一套"决策/观察文本"。
 
-`cli.py` 新增 `--stream`：
+`cli.py` 新增 `--stream`：内部走 `complete_stream`，但只输出最终回答文本，
+不打印逐步轨迹：
 
 ```python
 if arguments.stream:
-    state = agent.run(arguments.task, stream=True, on_step=_print_stream_step)
+    state = agent.run(arguments.task, stream=True)
 else:
     state = agent.run(arguments.task)
+...
+if state.final_answer is not None:
+    if arguments.stream:
+        print(state.final_answer.content)
+    else:
+        print(f"最终回答：{state.final_answer.content}")
 ```
 
-`_print_stream_step` 在每个步骤完成后打印 `render_step(step)`。因为模型输出
-本身是 JSON 决策，CLI 不逐字符打印原始 JSON，而是以"步骤完成即打印"的
-粒度实时展示；`--show-trace` 仍可在结束后打印完整轨迹，两者不冲突。
+`--show-trace` 保持独立：显式传入时仍在结束后打印完整轨迹（与 `--stream`
+共存），因此"干净的结果输出"与"完整过程查看"可以分开使用。
 
 ## 3. 测试怎么验
 
@@ -292,9 +296,9 @@ else:
 - **为什么 `complete_stream` 是协议的必需方法**：三个实现都在仓库内同步
   交付；代价是外部只实现 `complete` 的旧适配器不再满足协议（测试里同步
   补上了流式方法）；
-- **为什么 CLI 展示粒度是"步骤"而不是"字符"**：模型输出是 JSON 决策，
-  逐字符打印原始 JSON 对用户不友好；"步骤完成即打印"已经让
-  决策/工具调用/观察边产生边显示，token 级增量由协议层承担；
+- **为什么 `--stream` 只输出最终回答**：模型输出是 JSON 决策，逐步轨迹或
+  原始 JSON 对只想看结果的使用者都是噪音；`--stream` 承担"干净的结果输出"，
+  `--show-trace` 承担"完整过程查看"，token 级增量由协议层承担；
 - **已知边界**：真实 DeepSeek 偶尔会在 JSON 前输出散文，触发一次有界
   解析重试后恢复（实测出现过一次）；`OPENAI_API_KEY` 当前无效，OpenAI
   流式留待有效密钥后手动验收。
