@@ -11,15 +11,21 @@ Message；消息、工具定义与响应转换和 OpenAI 适配器共用 ``opena
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from openai import OpenAI
 
-from self_react.llm import LLMConfigurationError, LLMProviderError
+from self_react.llm import (
+    LLMConfigurationError,
+    LLMProviderError,
+    LLMResponseError,
+    StreamChunk,
+)
 from self_react.models import Message
 from self_react.openai_compat import (
     Client,
+    StreamAccumulator,
     deserialize_response,
     provider_error_code,
     serialize_messages,
@@ -113,6 +119,56 @@ class DeepSeekLLM:
             code = provider_error_code(exc)
             raise LLMProviderError(code, f"DeepSeek 请求失败（{code.value}）") from None
         return deserialize_response(response)
+
+    def complete_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Iterator[StreamChunk]:
+        """发起一次流式请求，逐块产出内容增量；组装后与 ``complete`` 等价。
+        流式块里的 ``reasoning_content``（思考模式）按非流式路径约定忽略；
+        工具调用参数跨块按 index 增量拼接，在末尾块一次性携带。
+        """
+
+        payload = serialize_messages(messages)
+        serialized_tools = serialize_tools(tools) if tools is not None else None
+        extra_body: dict[str, Any] = {}
+        if self.thinking_disabled:
+            extra_body["thinking"] = {"type": "disabled"}
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.model,
+                messages=payload,
+                stream=True,
+                tools=serialized_tools,
+                extra_body=extra_body,
+            )
+        except Exception as exc:
+            code = provider_error_code(exc)
+            raise LLMProviderError(
+                code, f"DeepSeek 流式请求失败（{code.value}）"
+            ) from None
+
+        accumulator = StreamAccumulator()
+        try:
+            for chunk in stream:
+                delta = accumulator.feed(chunk)
+                if delta.content:
+                    yield delta
+            message = accumulator.message()
+            if message.tool_calls:
+                yield StreamChunk(
+                    content="",
+                    tool_calls=tuple(message.tool_calls),
+                )
+        except LLMResponseError:
+            raise
+        except Exception as exc:
+            code = provider_error_code(exc)
+            raise LLMProviderError(
+                code, f"DeepSeek 流式读取失败（{code.value}）"
+            ) from None
 
 
 __all__ = [

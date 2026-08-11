@@ -8,7 +8,8 @@
 
 渲染是纯函数展示层：它不做任何决策，不改变 ``AgentState``，也不修改 Day 4
 领域模型、Day 12 主循环或任何工具。``LLM.complete`` 接口、DeepSeek 适配器、
-提示词、解析器和工具注册表都原封不动。
+提示词、解析器和工具注册表都原封不动。单步渲染 ``render_step`` 单独导出，
+供 CLI ``--stream`` 与完整轨迹共用同一套决策/观察文本。
 """
 
 from __future__ import annotations
@@ -143,7 +144,7 @@ def _render_error(error: TraceError) -> list[str]:
     ]
 
 
-def _render_step(step: TraceStep) -> str:
+def render_step(step: TraceStep) -> str:
     """渲染一个轨迹步骤，字段顺序与领域模型一致。"""
 
     lines = [f"第 {step.step_number} 步"]
@@ -173,8 +174,8 @@ def render_trace(state: AgentState) -> str:
         raise TypeError("render_trace 只接受 AgentState")
 
     sections = [_render_header(state)]
-    sections.extend(_render_step(step) for step in state.trace)
+    sections.extend(render_step(step) for step in state.trace)
     return "\n\n".join(sections)
 
 
-__all__ = ["render_trace"]
+__all__ = ["render_step", "render_trace"]

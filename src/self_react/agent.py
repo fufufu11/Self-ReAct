@@ -9,8 +9,10 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 循环控制器（``Agent``）拥有唯一的步数计数与终止判断；``AgentState`` 是唯一
 运行状态，只保存任务、消息、可用工具名称、步数预算、轨迹和终止信息，不保存
 模型客户端、注册表、密钥或其他不可序列化运行时资源。本模块不实现适配器级
-重试、流式、异步、持久化或并行工具调度；``LLM.complete`` 抛出的适配器错误
-按原样向上传播，由调用方决定如何处理。解析失败只做至多一次的有界重试：把
+重试、异步、持久化或并行工具调度；流式通过可选 ``stream`` 参数消费
+``complete_stream`` 的增量并组装出与非流式完全相同的消息。``LLM.complete``
+抛出的适配器错误按原样向上传播，由调用方决定如何处理。解析失败只做至多
+一次的有界重试：把
 稳定错误消息回写给模型、消耗一步预算；重试仍失败或预算不足以发起重试时，以
 ``MODEL_OUTPUT_PARSE_ERROR`` 终止，杜绝解析重试的无限子循环。重复动作（复用
 ``call_id`` 或同一工具连续使用相同参数）在分派前被拦截，作为带
@@ -21,9 +23,9 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 
-from self_react.llm import LLM
+from self_react.llm import LLM, StreamChunk, collect_stream
 from self_react.memory import ContextPolicy
 from self_react.models import (
     AgentState,
@@ -121,7 +123,9 @@ class Agent:
 
     ``Agent`` 只依赖 ``LLM`` 协议和 ``ToolRegistry`` 公开接口：任何满足协议的
     适配器（Fake LLM、DeepSeekLLM）和任何注册了确定性工具的注册表都可以传入。
-    每次 ``run`` 返回一个满足 Day 4 状态不变量的终态 ``AgentState``。
+    每次 ``run`` 返回一个满足 Day 4 状态不变量的终态 ``AgentState``；可选
+    ``stream`` 参数让循环消费流式增量，并通过 ``on_chunk`` / ``on_step``
+    回调把增量和逐步结果即时交给展示层。
     """
 
     def __init__(
@@ -150,11 +154,31 @@ class Agent:
         self._max_steps = max_steps
         self._context_policy = context_policy
 
-    def run(self, task: str) -> AgentState:
-        """执行一次 ReAct 运行，并返回终态 ``AgentState``。"""
+    def run(
+        self,
+        task: str,
+        *,
+        stream: bool = False,
+        on_chunk: Callable[[StreamChunk], None] | None = None,
+        on_step: Callable[[TraceStep], None] | None = None,
+    ) -> AgentState:
+        """执行一次 ReAct 运行，并返回终态 ``AgentState``。
+        默认走 ``LLM.complete`` 非流式路径，行为与 R-04 之前逐字节一致；
+        ``stream=True`` 时每轮改用 ``complete_stream`` 消费增量，组装出的
+        消息与非流式完全等价。``on_chunk`` 在每个增量块到达时触发；
+        ``on_step`` 在每个 TraceStep 完成后触发，供 CLI 边产生边显示。
+        """
 
         if not isinstance(task, str):
             raise TypeError("task 必须是字符串")
+        if on_chunk is not None and not callable(on_chunk):
+            raise TypeError("on_chunk 必须是可调用对象")
+        if on_step is not None and not callable(on_step):
+            raise TypeError("on_step 必须是可调用对象")
+
+        def _notify_step(step: TraceStep) -> None:
+            if on_step is not None:
+                on_step(step)
 
         tool_names = tuple(self._registry.names)
         tools = [
@@ -196,7 +220,15 @@ class Agent:
                 if self._context_policy is None
                 else self._context_policy.prepare(messages)
             )
-            response = self._llm.complete(request_messages, tools=tools)
+            if stream:
+                response = collect_stream(
+                    self._stream_with_callback(
+                        self._llm.complete_stream(request_messages, tools=tools),
+                        on_chunk,
+                    )
+                )
+            else:
+                response = self._llm.complete(request_messages, tools=tools)
             duration_ms = (time.perf_counter() - started) * 1_000.0
             messages.append(response)
 
@@ -227,6 +259,7 @@ class Agent:
                         observation=observation,
                         duration_ms=duration_ms,
                     )
+                    _notify_step(step)
                     state = self._rebuild_state(
                         task=task,
                         tool_names=tool_names,
@@ -256,6 +289,7 @@ class Agent:
                         ),
                         duration_ms=duration_ms,
                     )
+                    _notify_step(step)
                     trace = [*state.trace, step]
                     if not retryable:
                         state = self._rebuild_state(
@@ -277,6 +311,15 @@ class Agent:
                     messages.append(_parse_error_feedback(exc))
                     parse_retried = True
                     continue
+                if isinstance(decision, ToolCall) and not response.tool_calls:
+                    # 文本 JSON 工具调用补成原生 tool_calls 写回历史：OpenAI
+                    # 兼容 API 要求 tool 消息紧跟带 tool_calls 的 assistant
+                    # 消息（流式与非流式同样适用），否则下一轮请求会被拒绝。
+                    messages[-1] = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=response.content,
+                        tool_calls=[decision],
+                    )
 
             if isinstance(decision, FinalAnswer):
                 step = TraceStep(
@@ -285,6 +328,7 @@ class Agent:
                     decision=decision,
                     duration_ms=duration_ms,
                 )
+                _notify_step(step)
                 state = self._rebuild_state(
                     task=task,
                     tool_names=tool_names,
@@ -322,6 +366,7 @@ class Agent:
                     decision=answer,
                     duration_ms=duration_ms,
                 )
+                _notify_step(step)
                 state = self._rebuild_state(
                     task=task,
                     tool_names=tool_names,
@@ -353,6 +398,7 @@ class Agent:
                 observation=observation,
                 duration_ms=duration_ms,
             )
+            _notify_step(step)
             terminated = (
                 not result.is_success
                 and result.error is not None
@@ -372,6 +418,18 @@ class Agent:
             continue
 
         return state
+
+    @staticmethod
+    def _stream_with_callback(
+        chunks: Iterator[StreamChunk],
+        on_chunk: Callable[[StreamChunk], None] | None,
+    ) -> Iterator[StreamChunk]:
+        """透传流式增量，并在每个块到达时通知展示回调。"""
+
+        for chunk in chunks:
+            if on_chunk is not None:
+                on_chunk(chunk)
+            yield chunk
 
     def _rebuild_state(
         self,

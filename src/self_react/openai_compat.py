@@ -35,6 +35,7 @@ from self_react.llm import (
     LLMInputError,
     LLMProviderErrorCode,
     LLMResponseError,
+    StreamChunk,
 )
 from self_react.models import Message, MessageRole, ToolCall
 from self_react.tools.base import DEFAULT_PARAMETERS_SCHEMA
@@ -278,6 +279,110 @@ def deserialize_response(response: Any) -> Message:
         raise LLMResponseError("供应商响应无法构造为 assistant Message") from exc
 
 
+class StreamAccumulator:
+    """跨流式块累积内容与工具调用参数片段，最终组装为 assistant Message。
+
+    只做纯转换：不发起网络请求、不读取环境变量、不执行工具。``feed``
+    消费一个 OpenAI 兼容的流式块并返回本块的内容增量；``message`` 在
+    全部块消费完毕后返回与 ``complete`` 路径 ``deserialize_response``
+    等价的 assistant Message。``reasoning_content``（DeepSeek 思考模式）
+    按 ``complete`` 路径约定忽略，不进入领域 Message。
+    """
+
+    def __init__(self) -> None:
+        """初始化空的内容片段与工具调用累积槽。"""
+
+        self._content_parts: list[str] = []
+        self._tool_call_parts: dict[int, dict[str, str]] = {}
+
+    def feed(self, chunk: Any) -> StreamChunk:
+        """消费一个流式块，返回本块新增的内容增量。"""
+
+        choices = _field(chunk, "choices", None)
+        if choices is None:
+            return StreamChunk(content="")
+        if isinstance(choices, (str, bytes)) or not isinstance(choices, Sequence):
+            raise LLMResponseError("流式响应 choices 必须是序列")
+        if not choices:
+            return StreamChunk(content="")
+
+        raw_delta = _field(choices[0], "delta", None)
+        if raw_delta is None:
+            return StreamChunk(content="")
+        content = _field(raw_delta, "content", None)
+        if content is None:
+            content = ""
+        if not isinstance(content, str):
+            raise LLMResponseError("流式响应 delta.content 必须是字符串或 null")
+        self._content_parts.append(content)
+
+        raw_tool_calls = _field(raw_delta, "tool_calls", None)
+        if raw_tool_calls is not None:
+            if isinstance(raw_tool_calls, (str, bytes)) or not isinstance(
+                raw_tool_calls, Sequence
+            ):
+                raise LLMResponseError("流式响应 delta.tool_calls 必须是序列")
+            for raw_call in raw_tool_calls:
+                self._feed_tool_call(raw_call)
+
+        return StreamChunk(content=content)
+
+    def _feed_tool_call(self, raw_call: Any) -> None:
+        """把单个工具调用增量片段并入对应 index 的累积槽。"""
+
+        index = _field(raw_call, "index", None)
+        if not isinstance(index, int) or isinstance(index, bool):
+            index = max(self._tool_call_parts, default=-1) + 1
+        entry = self._tool_call_parts.setdefault(
+            index, {"id": "", "name": "", "arguments": ""}
+        )
+
+        call_id = _field(raw_call, "id", None)
+        if call_id is not None:
+            entry["id"] += _text(call_id, field_name="tool_call_delta.id")
+
+        call_type = _field(raw_call, "type", None)
+        if call_type is not None:
+            type_text = _text(call_type, field_name="tool_call_delta.type")
+            if type_text != "function":
+                raise LLMResponseError("流式工具调用 type 必须是 function")
+
+        function = _field(raw_call, "function", None)
+        if function is not None:
+            name = _field(function, "name", None)
+            if name is not None:
+                entry["name"] += _text(name, field_name="tool_call_delta.function.name")
+            arguments = _field(function, "arguments", None)
+            if arguments is not None:
+                entry["arguments"] += _text(
+                    arguments, field_name="tool_call_delta.function.arguments"
+                )
+
+    def message(self) -> Message:
+        """返回与一次性响应等价（按 index 排序）的 assistant Message。"""
+
+        calls: list[ToolCall] = []
+        for index in sorted(self._tool_call_parts):
+            entry = self._tool_call_parts[index]
+            raw_call = {
+                "id": entry["id"],
+                "type": "function",
+                "function": {
+                    "name": entry["name"],
+                    "arguments": entry["arguments"],
+                },
+            }
+            calls.append(_deserialize_tool_call(raw_call))
+        try:
+            return Message(
+                role=MessageRole.ASSISTANT,
+                content="".join(self._content_parts),
+                tool_calls=calls,
+            )
+        except Exception as exc:
+            raise LLMResponseError("流式增量无法组装为 assistant Message") from exc
+
+
 def provider_error_code(error: Exception) -> LLMProviderErrorCode:
     """将 SDK 异常映射成不依赖供应商文本的稳定类别。"""
 
@@ -312,6 +417,7 @@ def provider_error_code(error: Exception) -> LLMProviderErrorCode:
 __all__ = [
     "Client",
     "CompletionsClient",
+    "StreamAccumulator",
     "deserialize_response",
     "provider_error_code",
     "serialize_message",

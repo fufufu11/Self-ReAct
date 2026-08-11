@@ -4,7 +4,8 @@
 链路，行为保持不变。``run`` 命令负责把任务交给 Day 12 的 ``Agent`` 执行：
 CLI 只做参数解析、组装工具注册表与模型适配器、把终态结果打印给人看，不复制
 主循环逻辑——``Agent`` 仍是唯一的循环控制者。``--show-trace`` 时打印的文本
-与 Day 13 的 ``render_trace`` 完全一致。
+与 Day 13 的 ``render_trace`` 完全一致；``--stream`` 时每个步骤完成即打印
+``render_step`` 的可读文本，最终答案随后输出。
 
 CLI 默认不要求真实 API Key 即可运行：``--help``、参数校验错误路径和
 ``--model fake`` 的确定性演示都不会读取任何 API Key；只有真正选择
@@ -26,7 +27,7 @@ from self_react.agent import Agent
 from self_react.examples import EXAMPLES, run_example
 from self_react.llm import LLM, LLMError, LLMProviderError
 from self_react.memory import DEFAULT_CONTEXT_WINDOW, ContextPolicy
-from self_react.models import TerminationReason
+from self_react.models import TerminationReason, TraceStep
 from self_react.providers import available_providers, create_provider
 from self_react.tools import (
     CalculatorTool,
@@ -35,7 +36,7 @@ from self_react.tools import (
     RetrieveTool,
     ToolRegistry,
 )
-from self_react.trace import render_trace
+from self_react.trace import render_step, render_trace
 
 HELLO_MESSAGE = "Hello from Self-ReAct!"
 """``hello`` 命令的固定输出，作为 CLI 和测试共享的明确契约。"""
@@ -95,6 +96,16 @@ def _build_registry() -> ToolRegistry:
     registry.register(RetrieveTool())
     registry.register(FinalAnswerTool())
     return registry
+
+
+def _print_stream_step(step: TraceStep) -> None:
+    """``--stream`` 时在每个步骤完成后立即打印该步的可读文本。
+    与 ``render_trace`` 共用同一套决策/观察渲染文本：模型只输出 JSON 决策，
+    因此 CLI 不逐字符打印原始 JSON，而是以“步骤完成即打印”的粒度实时展示。
+    """
+
+    print()
+    print(render_step(step))
 
 
 def _create_parser() -> argparse.ArgumentParser:
@@ -159,6 +170,15 @@ def _create_parser() -> argparse.ArgumentParser:
         default=False,
         help="是否打印人类可读执行轨迹；默认不打印（可用 --no-show-trace 显式关闭）。",
     )
+    run_parser.add_argument(
+        "--stream",
+        action="store_true",
+        default=False,
+        help=(
+            "实时展示生成过程：每个决策/工具调用/观察完成后立即打印，"
+            "最终答案随后输出；默认关闭，不影响既有输出。"
+        ),
+    )
     example_parser = subcommands.add_parser(
         "example",
         help="运行 Day 16 确定性端到端示例（无需网络与 API Key）。",
@@ -192,7 +212,14 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
         context_policy=ContextPolicy(context_window=arguments.context_window),
     )
     try:
-        state = agent.run(arguments.task)
+        if arguments.stream:
+            state = agent.run(
+                arguments.task,
+                stream=True,
+                on_step=_print_stream_step,
+            )
+        else:
+            state = agent.run(arguments.task)
     except LLMProviderError as exc:
         print(f"模型调用失败：{exc}", file=sys.stderr)
         return 3

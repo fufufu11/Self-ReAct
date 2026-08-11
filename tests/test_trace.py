@@ -36,7 +36,7 @@ from self_react.tools import (
     ToolExecutionError,
     ToolRegistry,
 )
-from self_react.trace import render_trace
+from self_react.trace import render_step, render_trace
 
 
 def _json_message(raw: str) -> Message:
@@ -510,6 +510,34 @@ def test_render_rejects_non_state() -> None:
 
     with pytest.raises(TypeError):
         render_trace(object())  # type: ignore[arg-type]
+
+
+def test_render_step_is_public_and_matches_trace_section() -> None:
+    """render_step 导出单步文本，流式展示可复用同一套渲染。"""
+
+    step = TraceStep(
+        step_number=1,
+        input_summary="任务",
+        decision=FinalAnswer(content="完成"),
+        duration_ms=1.0,
+    )
+    state = AgentState(
+        task="任务",
+        messages=[],
+        available_tools=[],
+        max_steps=1,
+        steps_used=1,
+        trace=[step],
+        final_answer=FinalAnswer(content="完成"),
+        termination_reason=TerminationReason.FINAL_ANSWER,
+    )
+
+    section = render_step(step)
+
+    assert section == (
+        "第 1 步\n输入摘要：任务\n决策：最终回答\n回答内容：完成\n耗时：1 毫秒"
+    )
+    assert section in render_trace(state)
 
 
 def test_end_to_end_task_to_final_answer_renders() -> None:

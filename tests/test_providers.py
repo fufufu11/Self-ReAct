@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
-from self_react.llm import LLM, LLMConfigurationError
+from self_react.llm import LLM, LLMConfigurationError, StreamChunk
 from self_react.models import Message, MessageRole
 from self_react.providers import (
     available_providers,
@@ -34,6 +36,15 @@ class PresetLLM:
         response = self._responses[self._index]
         self._index += 1
         return response
+
+    def complete_stream(
+        self,
+        messages: object,
+        *,
+        tools: object | None = None,
+    ) -> Iterator[StreamChunk]:
+        response = self.complete(messages, tools=tools)
+        yield StreamChunk(content=response.content)
 
 
 def test_default_providers_are_registered_and_sorted() -> None:

@@ -1,17 +1,19 @@
 """与模型供应商解耦的 LLM 接口和确定性测试适配器。
-
-本模块的接口只接收模型上下文并返回助手消息。工具调用仍只是返回消息中的
-``ToolCall`` 数据；执行工具、构造 ``ToolResult``、修改 ``AgentState`` 以及决定
-重试或终止，都属于后续 Agent 和工具模块的职责。
+本模块的接口只接收模型上下文并返回助手消息；流式调用通过 ``complete_stream``
+逐块产出增量，最终用 :func:`collect_stream` 组装出与 ``complete`` 等价的
+消息。工具调用仍只是返回消息中的 ``ToolCall`` 数据；执行工具、构造
+``ToolResult``、修改 ``AgentState`` 以及决定重试或终止，都属于后续 Agent
+和工具模块的职责。
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from self_react.models import Message, MessageRole
+from self_react.models import Message, MessageRole, ToolCall
 
 
 class LLMError(Exception):
@@ -74,6 +76,70 @@ class LLM(Protocol):
         """根据完整消息上下文生成下一条助手消息。"""
         ...
 
+    def complete_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Iterator[StreamChunk]:
+        """生成式流式调用：逐块产出增量，组装后与 ``complete`` 等价。"""
+        ...
+
+
+FAKE_STREAM_CHUNK_SIZE = 8
+"""Fake 流把每条响应内容切成等长块的字数；固定值保证确定性可断言。"""
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """一次流式调用中的一段增量数据。
+
+    ``content`` 是本块新增的文本片段（可为空串）；``tool_calls`` 是到当前
+    块为止已完成组装的工具调用，通常只在最后一个块出现。调用方可以消费
+    ``content`` 做实时展示，最终用 :func:`collect_stream` 组装出与
+    ``complete`` 等价的 assistant Message。
+    """
+
+    content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        """拒绝非字符串内容与非 ToolCall 元素，避免组装阶段才暴露类型错误。"""
+
+        if not isinstance(self.content, str):
+            raise TypeError("StreamChunk.content 必须是字符串")
+        if isinstance(self.tool_calls, (str, bytes)) or not isinstance(
+            self.tool_calls, tuple
+        ):
+            raise TypeError("StreamChunk.tool_calls 必须是 ToolCall 元组")
+        if not all(isinstance(call, ToolCall) for call in self.tool_calls):
+            raise TypeError("StreamChunk.tool_calls 必须只包含 ToolCall")
+
+
+def collect_stream(chunks: Iterable[StreamChunk]) -> Message:
+    """把完整增量序列组装成与 ``complete`` 等价的 assistant Message。
+
+    拼接所有 ``content`` 增量并按出现顺序收集 ``tool_calls``；无法组装出
+    合法 assistant Message（例如重复工具调用编号）时报稳定响应错误。只做
+    纯转换，不访问网络、不读取环境变量、不修改输入。
+    """
+
+    content_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    for chunk in chunks:
+        if not isinstance(chunk, StreamChunk):
+            raise LLMResponseError("流式增量序列只能包含 StreamChunk")
+        content_parts.append(chunk.content)
+        tool_calls.extend(chunk.tool_calls)
+    try:
+        return Message(
+            role=MessageRole.ASSISTANT,
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+        )
+    except Exception:
+        raise LLMResponseError("流式增量无法组装为 assistant Message") from None
+
 
 def _snapshot_input(messages: Sequence[Message]) -> tuple[Message, ...]:
     """校验一次调用输入，并创建与调用方可变对象隔离的快照。"""
@@ -122,6 +188,23 @@ class FakeLLM:
             tuple[tuple[Message, ...], tuple[object, ...]]
         ] = []
 
+    def _prepare_call(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object] | None,
+    ) -> None:
+        """校验并快照一次调用输入，写入调用历史（含工具清单快照）。"""
+
+        snapshot = _snapshot_input(messages)
+        if tools is None:
+            tools_snapshot: tuple[object, ...] = ()
+        elif isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
+            raise LLMInputError("tools 必须是工具序列")
+        else:
+            tools_snapshot = tuple(tools)
+        self._calls_with_tools.append((snapshot, tools_snapshot))
+        self._calls.append(snapshot)
+
     def complete(
         self,
         messages: Sequence[Message],
@@ -134,15 +217,7 @@ class FakeLLM:
         只做记录，不改变返回行为。
         """
 
-        snapshot = _snapshot_input(messages)
-        if tools is None:
-            tools_snapshot: tuple[object, ...] = ()
-        elif isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
-            raise LLMInputError("tools 必须是工具序列")
-        else:
-            tools_snapshot = tuple(tools)
-        self._calls_with_tools.append((snapshot, tools_snapshot))
-        self._calls.append(snapshot)
+        self._prepare_call(messages, tools)
 
         if self._next_response_index >= len(self._responses):
             raise LLMResponseExhaustedError("Fake LLM 的预置响应已耗尽")
@@ -150,6 +225,33 @@ class FakeLLM:
         response = self._responses[self._next_response_index]
         self._next_response_index += 1
         return response.model_copy(deep=True)
+
+    def complete_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[object] | None = None,
+    ) -> Iterator[StreamChunk]:
+        """按固定大小切块产出预置响应的内容增量；末尾块携带完整工具调用。
+        与 ``complete`` 一样先校验并记录调用、按序消耗预置响应；耗尽时报
+        ``LLMResponseExhaustedError`` 且计入调用历史。块大小由
+        ``FAKE_STREAM_CHUNK_SIZE`` 固定，保证相同输入永远得到相同块序列。
+        """
+
+        self._prepare_call(messages, tools)
+        if self._next_response_index >= len(self._responses):
+            raise LLMResponseExhaustedError("Fake LLM 的预置响应已耗尽")
+
+        response = self._responses[self._next_response_index]
+        self._next_response_index += 1
+        content = response.content
+        for index in range(0, len(content), FAKE_STREAM_CHUNK_SIZE):
+            yield StreamChunk(content=content[index : index + FAKE_STREAM_CHUNK_SIZE])
+        if response.tool_calls:
+            yield StreamChunk(
+                content="",
+                tool_calls=tuple(response.tool_calls),
+            )
 
     @property
     def calls(self) -> tuple[tuple[Message, ...], ...]:
@@ -182,6 +284,7 @@ class FakeLLM:
 
 
 __all__ = [
+    "FAKE_STREAM_CHUNK_SIZE",
     "FakeLLM",
     "LLM",
     "LLMError",
@@ -191,4 +294,6 @@ __all__ = [
     "LLMProviderErrorCode",
     "LLMResponseError",
     "LLMResponseExhaustedError",
+    "StreamChunk",
+    "collect_stream",
 ]
