@@ -410,3 +410,58 @@ def test_run_default_context_window_keeps_short_context_unchanged(
     assert factory.created is not None
     for call in factory.created.calls:
         assert not any(SUMMARY_HEADING in message.content for message in call)
+
+
+def test_run_stream_prints_steps_then_final_answer(
+    capsys: CaptureFixture[str],
+) -> None:
+    """--stream 逐行先打印每一步（决策/观察），最后打印最终答案，不输出原始 JSON。"""
+
+    exit_code = main(
+        ["run", "计算 2 + 2，并检索 react", "--stream"],
+        build_llm=_preset_llm_factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    text = captured.out
+    assert text.index("第 1 步") < text.index("第 2 步") < text.index("第 3 步")
+    assert text.index("决策：调用工具 calculator") < text.index(
+        "决策：调用工具 retrieve"
+    )
+    assert "观察（成功）：" in text
+    assert text.index("最终回答：计算完成，并查到了 ReAct 的说明。") > text.index(
+        "第 3 步"
+    )
+    assert '{"kind"' not in text
+
+
+def test_run_stream_with_show_trace_prints_full_trace(
+    capsys: CaptureFixture[str],
+) -> None:
+    """--stream 与 --show-trace 可共存：结束时仍打印完整渲染轨迹。"""
+
+    exit_code = main(
+        ["run", "计算 2 + 2", "--stream", "--show-trace"],
+        build_llm=_preset_llm_factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "任务：计算 2 + 2" in captured.out
+    assert "终止原因：最终回答（FINAL_ANSWER）" in captured.out
+    assert "步数：3 / 5" in captured.out
+
+
+def test_run_without_stream_does_not_print_steps(
+    capsys: CaptureFixture[str],
+) -> None:
+    """默认不流式：不打印任何步骤文本，保持既有输出。"""
+
+    exit_code = main(["run", "任务"], build_llm=_preset_llm_factory)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "第 1 步" not in captured.out
+    assert "决策：" not in captured.out

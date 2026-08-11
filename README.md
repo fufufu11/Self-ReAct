@@ -21,6 +21,8 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
   非法参数在分派前以稳定错误码被拒。
 - 短程会话记忆：超过 `--context-window` 字符预算时，自动按整轮裁剪旧历史
   并回填规则式摘要（Claude auto-compact 风格），默认 20,000 字符。
+- 流式输出：`LLM.complete_stream` 增量协议 + Fake LLM 确定性流 + DeepSeek/OpenAI
+  真流式；CLI `--stream` 让每个决策/工具调用/观察完成即打印，默认关闭。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -86,6 +88,7 @@ uv run self-react hello
 ```powershell
 uv run self-react run "计算 2 + 2" --model deepseek --show-trace
 uv run self-react run "计算 2 + 2" --model openai --show-trace
+uv run self-react run "计算 2 + 2" --model deepseek --show-trace --stream
 ```
 
 `run` 参数：
@@ -97,6 +100,7 @@ uv run self-react run "计算 2 + 2" --model openai --show-trace
 | `--max-steps` | 最大决策步数（正整数） | `5` |
 | `--context-window` | 上下文窗口（字符数，正整数）；超过后自动按整轮裁剪旧历史并回填规则式摘要 | `20000` |
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
+| `--stream` | 实时展示生成过程：每个决策/工具调用/观察完成后立即打印，最终答案随后输出 | 不开启 |
 
 没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
 计算器 -> 检索 -> 最终回答）：
@@ -160,7 +164,7 @@ uv run self-react example failure-recovery
 
 - 单智能体、同步、每轮最多执行一个工具；供应商一次返回多个 `tool_calls` 时只执行
   第一个，其余以可恢复失败观察回写。
-- 无持久化、暂停/恢复、流式、异步或并行工具调度。
+- 无持久化、暂停/恢复、异步或并行工具调度。
 - 知识检索是模块内固定的内置知识库，不是向量数据库或 RAG 平台。
 - 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
   UTF-8 文本并截断超长内容。
@@ -199,8 +203,21 @@ uv run self-react example failure-recovery
 | 计算 2 + 2，并检索 react 主题 | calculator -> retrieve -> 最终回答 | 3 / 5 | 汇总计算与 ReAct 说明 |
 | 检索 qwerty123，失败就换 react | retrieve(qwerty123) 失败 -> retrieve(react) 成功 -> 最终回答 | 3 / 5 | 说明失败后改用 react 成功 |
 
-真实模型调用结果是非确定性的，不作为自动化测试前置条件；离线确定性的
-`self-react example` 三条命令是可复现基准。
+  真实模型调用结果是非确定性的，不作为自动化测试前置条件；离线确定性的
+  `self-react example` 三条命令是可复现基准。
+
+### 真实 DeepSeek 流式手动验收（Day 25）
+
+`--stream` 走 `complete_stream` 真流式；2026-08-11 用真实 DeepSeek
+（`deepseek-v4-flash`）验收两条任务，均以 `FINAL_ANSWER` 结束：
+
+| 任务 | 真实流式工具轨迹 | 步数 | 结果 |
+| --- | --- | --- | --- |
+| 计算 2 + 2 | calculator -> 观察 4 -> 最终回答 | 2 / 5 | `2 + 2 = 4` |
+| 计算 2 + 2，并检索 react 主题 | calculator -> retrieve -> 最终回答 | 3 / 5 | 汇总计算与 ReAct 说明 |
+
+真实 OpenAI 流式因 `OPENAI_API_KEY` 无效在验收时返回 `AUTHENTICATION`，
+留待有效密钥后补充（与 Day 16 的约定一致：真实调用不作为自动化前置条件）。
 
 ### 3分钟讲解
 

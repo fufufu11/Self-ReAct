@@ -10,7 +10,7 @@ Day 14 补充了模型超时/连接失败按原样传播、重复动作（同一
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 
@@ -20,6 +20,7 @@ from self_react.llm import (
     FakeLLM,
     LLMProviderError,
     LLMProviderErrorCode,
+    StreamChunk,
 )
 from self_react.memory import SUMMARY_HEADING, ContextPolicy
 from self_react.models import (
@@ -30,6 +31,7 @@ from self_react.models import (
     ToolCall,
     ToolErrorCode,
     TraceErrorCode,
+    TraceStep,
 )
 from self_react.prompts import render_system_prompt
 from self_react.tools import (
@@ -679,6 +681,15 @@ def test_llm_provider_error_propagates_unchanged(
         ) -> Message:
             raise LLMProviderError(code, message)
 
+        def complete_stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            tools: Sequence[object] | None = None,
+        ) -> Iterator[StreamChunk]:
+            response = self.complete(messages, tools=tools)
+            yield StreamChunk(content=response.content)
+
     registry = _default_registry()
     llm = TimeoutLLM()
     assert isinstance(llm, LLM)
@@ -872,6 +883,15 @@ def test_agent_accepts_any_llm_protocol_adapter() -> None:
             tools: Sequence[object] | None = None,
         ) -> Message:
             return _final_answer_json("固定回答")
+
+        def complete_stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            tools: Sequence[object] | None = None,
+        ) -> Iterator[StreamChunk]:
+            response = self.complete(messages, tools=tools)
+            yield StreamChunk(content=response.content)
 
     adapter = FixedLLM()
     assert isinstance(adapter, LLM)
@@ -1088,3 +1108,85 @@ def test_agent_with_context_policy_trims_request_keeps_state_full() -> None:
         MessageRole.ASSISTANT,
     ]
     assert all(SUMMARY_HEADING not in message.content for message in state.messages)
+
+
+def test_stream_mode_state_matches_non_stream_mode() -> None:
+    """流式模式与非流式模式产生相同的决策、观察、消息与终止信息。"""
+
+    presets = [
+        _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+        _final_answer_json("结果是 4。"),
+    ]
+    registry = _default_registry()
+
+    streamed = Agent(llm=FakeLLM(list(presets)), registry=registry, max_steps=3).run(
+        "计算 2 + 2", stream=True
+    )
+    plain = Agent(llm=FakeLLM(list(presets)), registry=registry, max_steps=3).run(
+        "计算 2 + 2"
+    )
+
+    assert streamed.termination_reason is plain.termination_reason
+    assert streamed.final_answer == plain.final_answer
+    assert streamed.steps_used == plain.steps_used
+    assert [step.decision for step in streamed.trace] == [
+        step.decision for step in plain.trace
+    ]
+    assert [step.observation for step in streamed.trace] == [
+        step.observation for step in plain.trace
+    ]
+    assert streamed.messages == plain.messages
+
+
+def test_stream_mode_forwards_content_chunks_to_callback() -> None:
+    """on_chunk 收到每个增量块；拼接后等于完整模型输出。"""
+
+    presets = [
+        _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+        _final_answer_json("结果是 4。"),
+    ]
+    received: list[str] = []
+    registry = _default_registry()
+
+    Agent(llm=FakeLLM(presets), registry=registry, max_steps=3).run(
+        "计算 2 + 2",
+        stream=True,
+        on_chunk=lambda chunk: received.append(chunk.content),
+    )
+
+    joined = "".join(received)
+    assert "tool_call" in joined
+    assert "结果是 4。" in joined
+
+
+def test_stream_mode_calls_on_step_for_each_trace_step() -> None:
+    """on_step 按顺序收到每个 TraceStep，供 CLI 边产生边显示。"""
+
+    presets = [
+        _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+        _final_answer_json("结果是 4。"),
+    ]
+    steps: list[TraceStep] = []
+    registry = _default_registry()
+
+    Agent(llm=FakeLLM(presets), registry=registry, max_steps=3).run(
+        "计算 2 + 2",
+        stream=True,
+        on_step=steps.append,
+    )
+
+    assert [step.step_number for step in steps] == [1, 2]
+    assert steps[0].decision is not None
+    assert steps[1].decision == FinalAnswer(content="结果是 4。")
+
+
+def test_run_rejects_invalid_stream_callbacks() -> None:
+    """on_chunk 与 on_step 必须是可调用对象。"""
+
+    llm = FakeLLM([_final_answer_json("完成")])
+    agent = Agent(llm=llm, registry=_default_registry(), max_steps=1)
+
+    with pytest.raises(TypeError):
+        agent.run("任务", stream=True, on_chunk=object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        agent.run("任务", on_step=object())  # type: ignore[arg-type]
