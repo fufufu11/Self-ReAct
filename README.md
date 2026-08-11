@@ -22,7 +22,7 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
 - 短程会话记忆：超过 `--context-window` 字符预算时，自动按整轮裁剪旧历史
   并回填规则式摘要（Claude auto-compact 风格），默认 20,000 字符。
 - 流式输出：`LLM.complete_stream` 增量协议 + Fake LLM 确定性流 + DeepSeek/OpenAI
-  真流式；CLI `--stream` 内部走流式、只输出最终回答，默认关闭。
+  真流式；CLI `--stream` 实时逐字输出最终回答，默认关闭。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -100,7 +100,7 @@ uv run self-react run "计算 2 + 2" --model deepseek --show-trace --stream
 | `--max-steps` | 最大决策步数（正整数） | `5` |
 | `--context-window` | 上下文窗口（字符数，正整数）；超过后自动按整轮裁剪旧历史并回填规则式摘要 | `20000` |
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
-| `--stream` | 内部走流式调用，只输出最终回答文本；不打印逐步轨迹 | 不开启 |
+| `--stream` | 实时逐字输出最终回答（从流式增量中提取，不打印逐步轨迹） | 不开启 |
 
 没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
 计算器 -> 检索 -> 最终回答）：
@@ -219,8 +219,9 @@ uv run self-react example failure-recovery
 真实 OpenAI 流式因 `OPENAI_API_KEY` 无效在验收时返回 `AUTHENTICATION`，
 留待有效密钥后补充（与 Day 16 的约定一致：真实调用不作为自动化前置条件）。
 
-> 收尾调整（2026-08-11）：按用户要求，`--stream` 改为只输出最终回答文本，
-> 不再打印逐步决策/工具调用/观察；完整轨迹仍由 `--show-trace` 提供。
+> 收尾调整（2026-08-11）：按用户要求，`--stream` 只输出最终回答，且从
+> 流式增量中实时逐字打印（不再打印逐步决策/工具调用/观察）；完整轨迹仍由
+> `--show-trace` 提供。
 
 ### 3分钟讲解
 

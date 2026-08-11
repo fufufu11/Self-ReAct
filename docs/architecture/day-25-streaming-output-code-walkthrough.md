@@ -248,21 +248,29 @@ assistant 消息；否则下一轮请求会被拒绝（DeepSeek 流式实测返�
 `trace.py` 把 `_render_step` 改名为公开的 `render_step`；`render_trace`
 内部复用它，因此流式展示与完整轨迹天然共用同一套"决策/观察文本"。
 
-`cli.py` 新增 `--stream`：内部走 `complete_stream`，但只输出最终回答文本，
-不打印逐步轨迹：
+`cli.py` 新增 `--stream`：内部走 `complete_stream`，用
+`_FinalAnswerStreamRenderer` 从流式增量里实时提取 `final_answer` 的
+`content` 并逐字打印（工具调用轮次静默，`--show-trace` 保持独立）：
 
 ```python
 if arguments.stream:
-    state = agent.run(arguments.task, stream=True)
+    renderer = _FinalAnswerStreamRenderer()
+    state = agent.run(arguments.task, stream=True, on_chunk=renderer)
 else:
     state = agent.run(arguments.task)
 ...
 if state.final_answer is not None:
     if arguments.stream:
-        print(state.final_answer.content)
+        renderer.finish(state.final_answer.content)
+        print()
     else:
         print(f"最终回答：{state.final_answer.content}")
 ```
+
+渲染器是一个小的 JSON 增量状态机：逐字符跟踪字符串/转义/括号深度，识别
+`kind == "final_answer"` 后把 `content` 值逐字写到 stdout（每次 `flush`，
+保证终端与管道都实时可见）；无法实时提取时（例如原生 `final_answer` 工具
+调用），`finish` 在结束后补齐剩余文本，保证输出完整。
 
 `--show-trace` 保持独立：显式传入时仍在结束后打印完整轨迹（与 `--stream`
 共存），因此"干净的结果输出"与"完整过程查看"可以分开使用。
@@ -296,9 +304,10 @@ if state.final_answer is not None:
 - **为什么 `complete_stream` 是协议的必需方法**：三个实现都在仓库内同步
   交付；代价是外部只实现 `complete` 的旧适配器不再满足协议（测试里同步
   补上了流式方法）；
-- **为什么 `--stream` 只输出最终回答**：模型输出是 JSON 决策，逐步轨迹或
-  原始 JSON 对只想看结果的使用者都是噪音；`--stream` 承担"干净的结果输出"，
-  `--show-trace` 承担"完整过程查看"，token 级增量由协议层承担；
+- **为什么 `--stream` 实时逐字输出**：最终回答以 JSON 文本增量到达，渲染器
+  只提取 `content` 值打印；工具轮次/轨迹对只想看结果的使用者是噪音，
+  `--show-trace` 承担"完整过程查看"；原生工具调用路径无法实时提取时由
+  `finish` 兜底补齐；
 - **已知边界**：真实 DeepSeek 偶尔会在 JSON 前输出散文，触发一次有界
   解析重试后恢复（实测出现过一次）；`OPENAI_API_KEY` 当前无效，OpenAI
   流式留待有效密钥后手动验收。

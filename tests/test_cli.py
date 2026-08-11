@@ -22,6 +22,7 @@ from self_react.llm import (
     LLMConfigurationError,
     LLMProviderError,
     LLMProviderErrorCode,
+    StreamChunk,
 )
 from self_react.memory import SUMMARY_HEADING
 from self_react.models import Message, MessageRole
@@ -461,3 +462,67 @@ def test_run_without_stream_does_not_print_steps(
     assert exit_code == 0
     assert "第 1 步" not in captured.out
     assert "决策：" not in captured.out
+
+
+def test_stream_renderer_prints_final_answer_live_incrementally(
+    capsys: CaptureFixture[str],
+) -> None:
+    """渲染器逐块实时打印 final_answer 的 content：每次输出都是其前缀。"""
+
+    from self_react.cli import _FinalAnswerStreamRenderer
+
+    renderer = _FinalAnswerStreamRenderer()
+    raw = '{"kind": "final_answer", "content": "2 + 2 = 4。"}'
+    expected = "2 + 2 = 4。"
+    printed = ""
+    for index in range(0, len(raw), 8):
+        renderer(StreamChunk(content=raw[index : index + 8]))
+        printed += capsys.readouterr().out
+        assert expected.startswith(printed), printed
+    assert printed == expected
+
+
+def test_stream_renderer_ignores_tool_call_response(
+    capsys: CaptureFixture[str],
+) -> None:
+    """工具调用轮次的 JSON 增量不产生任何输出。"""
+
+    from self_react.cli import _FinalAnswerStreamRenderer
+
+    renderer = _FinalAnswerStreamRenderer()
+    raw = (
+        '{"kind": "tool_call", "call_id": "call-1", "name": "calculator", '
+        '"arguments": {"expression": "2 + 2"}}'
+    )
+    renderer(StreamChunk(content=raw))
+    assert capsys.readouterr().out == ""
+
+
+def test_stream_renderer_ignores_prose_before_tool_call(
+    capsys: CaptureFixture[str],
+) -> None:
+    """工具轮次前的散文增量（真实 DeepSeek 行为）不产生任何输出。"""
+
+    from self_react.cli import _FinalAnswerStreamRenderer
+
+    renderer = _FinalAnswerStreamRenderer()
+    raw = (
+        "I'll calculate this simple expression for you.\n\n"
+        '{"kind": "tool_call", "call_id": "call-1", "name": "calculator", '
+        '"arguments": {"expression": "2 + 2"}}'
+    )
+    for index in range(0, len(raw), 8):
+        renderer(StreamChunk(content=raw[index : index + 8]))
+    assert capsys.readouterr().out == ""
+
+
+def test_stream_renderer_finish_prints_missing_remainder(
+    capsys: CaptureFixture[str],
+) -> None:
+    """实时提取失败（如原生 final_answer 工具调用）时，finish 补齐全文。"""
+
+    from self_react.cli import _FinalAnswerStreamRenderer
+
+    renderer = _FinalAnswerStreamRenderer()
+    renderer.finish("2 + 2 = 4")
+    assert capsys.readouterr().out == "2 + 2 = 4"
