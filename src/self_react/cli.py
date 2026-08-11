@@ -27,7 +27,7 @@ from self_react.agent import Agent
 from self_react.examples import EXAMPLES, run_example
 from self_react.llm import LLM, LLMError, LLMProviderError
 from self_react.memory import DEFAULT_CONTEXT_WINDOW, ContextPolicy
-from self_react.models import TerminationReason, TraceStep
+from self_react.models import TerminationReason
 from self_react.providers import available_providers, create_provider
 from self_react.tools import (
     CalculatorTool,
@@ -36,7 +36,7 @@ from self_react.tools import (
     RetrieveTool,
     ToolRegistry,
 )
-from self_react.trace import render_step, render_trace
+from self_react.trace import render_trace
 
 HELLO_MESSAGE = "Hello from Self-ReAct!"
 """``hello`` 命令的固定输出，作为 CLI 和测试共享的明确契约。"""
@@ -96,16 +96,6 @@ def _build_registry() -> ToolRegistry:
     registry.register(RetrieveTool())
     registry.register(FinalAnswerTool())
     return registry
-
-
-def _print_stream_step(step: TraceStep) -> None:
-    """``--stream`` 时在每个步骤完成后立即打印该步的可读文本。
-    与 ``render_trace`` 共用同一套决策/观察渲染文本：模型只输出 JSON 决策，
-    因此 CLI 不逐字符打印原始 JSON，而是以“步骤完成即打印”的粒度实时展示。
-    """
-
-    print()
-    print(render_step(step))
 
 
 def _create_parser() -> argparse.ArgumentParser:
@@ -175,8 +165,8 @@ def _create_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "实时展示生成过程：每个决策/工具调用/观察完成后立即打印，"
-            "最终答案随后输出；默认关闭，不影响既有输出。"
+            "内部走流式调用，只输出最终回答文本；不打印逐步轨迹，"
+            "默认关闭，不影响既有输出。"
         ),
     )
     example_parser = subcommands.add_parser(
@@ -213,11 +203,7 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
     )
     try:
         if arguments.stream:
-            state = agent.run(
-                arguments.task,
-                stream=True,
-                on_step=_print_stream_step,
-            )
+            state = agent.run(arguments.task, stream=True)
         else:
             state = agent.run(arguments.task)
     except LLMProviderError as exc:
@@ -225,7 +211,10 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
         return 3
 
     if state.final_answer is not None:
-        print(f"最终回答：{state.final_answer.content}")
+        if arguments.stream:
+            print(state.final_answer.content)
+        else:
+            print(f"最终回答：{state.final_answer.content}")
     elif state.termination_reason is not None:
         label = _TERMINATION_LABELS.get(
             state.termination_reason,
