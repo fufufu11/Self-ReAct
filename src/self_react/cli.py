@@ -25,7 +25,7 @@ from typing import Callable
 
 from self_react.agent import Agent
 from self_react.examples import EXAMPLES, run_example
-from self_react.llm import LLM, LLMError, LLMProviderError
+from self_react.llm import LLM, LLMError, LLMProviderError, StreamChunk
 from self_react.memory import DEFAULT_CONTEXT_WINDOW, ContextPolicy
 from self_react.models import TerminationReason
 from self_react.providers import available_providers, create_provider
@@ -55,6 +55,176 @@ _TERMINATION_LABELS: dict[TerminationReason, str] = {
     TerminationReason.TOOL_EXECUTION_ERROR: "工具执行失败",
 }
 """CLI 对非最终回答终止原因的中文标签，与 Day 13 渲染层保持一致。"""
+
+_JSON_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+"""JSON 字符串转义到实际字符的映射（不含 \\u，单独处理）。"""
+
+
+class _FinalAnswerStreamRenderer:
+    """从流式增量中实时提取 ``final_answer`` 的 ``content`` 并逐字打印。
+
+    只消费内容增量（``StreamChunk.content``）；工具调用轮次、解析重试等
+    中间响应不打印任何内容。无法实时提取时（例如原生 ``final_answer``
+    工具调用），由 :meth:`finish` 在运行结束后补齐最终回答文本。
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._pos = 0
+        self._in_string = False
+        self._escaped = False
+        self._unicode_hex: list[str] = []
+        self._depth = 0
+        self._after_colon = False
+        self._current = ""
+        self._last_key: str | None = None
+        self._is_final = False
+        self._printing = False
+        self._printed = ""
+
+    def __call__(self, chunk: StreamChunk) -> None:
+        """消费一个增量块，并尽可能实时打印最终回答内容。"""
+
+        if not chunk.content:
+            return
+        self._buffer += chunk.content
+        self._scan()
+
+    def finish(self, expected: str) -> None:
+        """运行结束后补齐未被实时打印的剩余部分，保证最终输出完整。"""
+
+        if self._printed == expected:
+            return
+        if expected.startswith(self._printed):
+            sys.stdout.write(expected[len(self._printed) :])
+        else:
+            sys.stdout.write(expected)
+        sys.stdout.flush()
+        self._printed = expected
+
+    def _scan(self) -> None:
+        """逐字符推进：识别 JSON 结构，定位并打印 final_answer 的 content。"""
+
+        buf = self._buffer
+        while self._pos < len(buf):
+            ch = buf[self._pos]
+            self._pos += 1
+            if self._printing:
+                self._feed_content(ch)
+                continue
+            if self._unicode_hex:
+                self._unicode_hex.append(ch)
+                if len(self._unicode_hex) == 4:
+                    code = "".join(self._unicode_hex)
+                    self._unicode_hex.clear()
+                    try:
+                        text = chr(int(code, 16))
+                    except ValueError:
+                        text = "\\u" + code
+                    self._write(text)
+                continue
+            if self._escaped:
+                self._escaped = False
+                continue
+            if self._in_string:
+                if ch == "\\":
+                    self._escaped = True
+                elif ch == '"':
+                    self._in_string = False
+                    self._on_string_end()
+                else:
+                    self._current += ch
+                continue
+            if ch == '"':
+                self._in_string = True
+                self._current = ""
+                if self._after_colon and self._is_final and self._last_key == "content":
+                    self._printing = True
+            elif ch == ":":
+                self._after_colon = True
+            elif ch == "{":
+                if self._depth == 0:
+                    self._reset_response()
+                self._depth += 1
+                self._after_colon = False
+            elif ch == "}":
+                if self._depth > 0:
+                    self._depth -= 1
+                    if self._depth == 0:
+                        self._reset_response()
+                self._after_colon = False
+            elif ch == ",":
+                self._after_colon = False
+
+    def _feed_content(self, ch: str) -> None:
+        """打印 content 字符串值里的字符，含转义与 \\uXXXX 处理。"""
+
+        if self._unicode_hex:
+            self._unicode_hex.append(ch)
+            if len(self._unicode_hex) == 4:
+                code = "".join(self._unicode_hex)
+                self._unicode_hex.clear()
+                try:
+                    text = chr(int(code, 16))
+                except ValueError:
+                    text = "\\u" + code
+                self._write(text)
+            return
+        if self._escaped:
+            self._escaped = False
+            if ch == "u":
+                self._unicode_hex = []
+            else:
+                self._write(_JSON_ESCAPES.get(ch, ch))
+            return
+        if ch == "\\":
+            self._escaped = True
+            return
+        if ch == '"':
+            self._printing = False
+            self._in_string = False
+            self._last_key = None
+            self._after_colon = False
+            return
+        self._write(ch)
+
+    def _on_string_end(self) -> None:
+        """普通字符串结束：区分 key 与 value，更新 kind/content 状态。"""
+
+        value = self._current
+        if self._after_colon:
+            self._after_colon = False
+            if self._last_key == "kind":
+                self._is_final = value == "final_answer"
+            self._last_key = None
+        else:
+            self._last_key = value
+
+    def _reset_response(self) -> None:
+        """响应结束或新响应开始时清空单轮解析状态（保留已打印文本）。"""
+
+        self._in_string = False
+        self._escaped = False
+        self._unicode_hex = []
+        self._after_colon = False
+        self._current = ""
+        self._last_key = None
+        self._is_final = False
+        self._printing = False
+
+    def _write(self, text: str) -> None:
+        self._printed += text
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 def build_llm(model: str, max_steps: int, task: str) -> LLM:
@@ -203,7 +373,8 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
     )
     try:
         if arguments.stream:
-            state = agent.run(arguments.task, stream=True)
+            renderer = _FinalAnswerStreamRenderer()
+            state = agent.run(arguments.task, stream=True, on_chunk=renderer)
         else:
             state = agent.run(arguments.task)
     except LLMProviderError as exc:
@@ -212,7 +383,8 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
 
     if state.final_answer is not None:
         if arguments.stream:
-            print(state.final_answer.content)
+            renderer.finish(state.final_answer.content)
+            print()
         else:
             print(f"最终回答：{state.final_answer.content}")
     elif state.termination_reason is not None:

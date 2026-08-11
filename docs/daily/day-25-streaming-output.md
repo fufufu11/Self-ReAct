@@ -79,9 +79,15 @@
 决策/工具调用/观察，只输出最终回答文本；内部仍走 `complete_stream`
 真流式。`--show-trace` 保持独立，显式传入时仍打印完整轨迹。
 
-- 改动仅在 `cli.py`：去掉 `on_step` 回调与 `_print_stream_step`，流式模式
-  最终回答只 `print(content)`；
-- 全量 pytest 508 通过 / 3 跳过；ruff 检查与格式检查通过；三条 `example`
+进一步调整（Issue #59）：用户反馈输出仍是一下子全部出现，因此新增
+`_FinalAnswerStreamRenderer`，从流式增量中实时提取 `final_answer` 的
+`content` 逐字打印（每次写 stdout 都 flush），工具轮次静默；
+无法实时提取时由 `finish` 兜底补齐。
+
+- 改动仅在 `cli.py`：去掉 `on_step` 回调与 `_print_stream_step`，新增
+  实时渲染器并接入 `on_chunk`；
+- 单元测试证明逐块增量打印（每次输出都是最终回答文本的前缀）；
+- 全量 pytest 512 通过 / 3 跳过；ruff 检查与格式检查通过；三条 `example`
   输出不变；
 - 真实 DeepSeek 手动验收：`uv run self-react run "计算 2 + 2" --model deepseek --stream`
-  输出仅 `2 + 2 = 4`，退出码 0。
+  输出仅 `2 + 2 = 4`、长回答无截断，退出码 0。
