@@ -15,7 +15,8 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
 - 单智能体 ReAct 主循环：模型决策 -> 工具执行 -> 观察回写 -> 下一轮决策（或终止）。
 - 与供应商解耦的 `LLM` 协议：Fake LLM、DeepSeekLLM 与 OpenAILLM 可互换，
   业务代码不依赖具体供应商。
-- 四个确定性本地工具：计算器、受限文件读取、内置知识检索、`final_answer` 特殊工具。
+- 确定性本地工具：计算器、受限文件读取、内置知识检索、`final_answer` 特殊工具，
+  以及 `log_query`（NDJSON 日志过滤/聚合）与 `runbook_search`（BM25 知识检索）。
 - Pydantic v2 结构化领域模型与人类可读的中文执行轨迹。
 - 工具参数 Schema 自动生成（Pydantic 参数模型 / 函数签名）与注册表预校验，
   非法参数在分派前以稳定错误码被拒。
@@ -101,6 +102,7 @@ uv run self-react run "计算 2 + 2" --model deepseek --show-trace --stream
 | `--context-window` | 上下文窗口（字符数，正整数）；超过后自动按整轮裁剪旧历史并回填规则式摘要 | `20000` |
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
 | `--stream` | 实时逐字输出最终回答（从流式增量中提取，不打印逐步轨迹） | 不开启 |
+| `--scenario` | 场景工具包：`log-troubleshooting`（日志/故障排查）；不指定时使用默认四个工具 | 不指定 |
 
 没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
 计算器 -> 检索 -> 最终回答）：
@@ -115,11 +117,22 @@ uv run self-react run "演示任务" --model fake --show-trace
 uv run self-react example single-tool
 uv run self-react example multi-tool
 uv run self-react example failure-recovery
+uv run self-react example log-5xx-spike
+uv run self-react example log-error-window
+uv run self-react example log-release-correlation
 ```
 
 三条示例固定展示单工具、多工具、工具失败后恢复三条主线，使用 Fake LLM 与
 确定性工具，不访问网络、不依赖 API Key，相同命令永远得到相同的决策与观察
-（耗时除外）。详细输出见下文[演示记录](#演示记录)。
+（耗时除外）。后三条是日志/故障排查场景的确定性示例，使用 `log_query`、
+`runbook_search` 等工具。详细输出见下文[演示记录](#演示记录)。
+
+用真实模型跑日志/故障排查场景时加上 `--scenario`：
+
+```powershell
+uv run self-react run "排查 checkout 服务的 5xx 错误突增" `
+  --model deepseek --scenario log-troubleshooting --show-trace
+```
 
 ## 架构简介
 
@@ -151,7 +164,8 @@ uv run self-react example failure-recovery
 | `trace.py` | 把终态渲染成稳定的人类可读中文轨迹 |
 | `cli.py` | `hello` / `run` / `example` 命令入口 |
 | `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |
-| `tools/` | `Tool` 协议、`ToolRegistry`、参数 Schema 自动生成与预校验，以及 calculator、file_reader、retrieve、final_answer |
+| `tools/` | `Tool` 协议、`ToolRegistry`、参数 Schema 自动生成与预校验，以及 calculator、file_reader、retrieve、log_query、runbook_search、final_answer |
+| `scenarios/` | 应用场景子包；`log_troubleshooting` 提供固定日志/runbook 数据、工具组装与三个确定性示例 |
 
 领域上下文与概念边界见 [`CONTEXT.md`](CONTEXT.md)；核心循环的完整调研与状态图见
 [`docs/architecture/react-loop.md`](docs/architecture/react-loop.md)；每个模块的
@@ -165,7 +179,8 @@ uv run self-react example failure-recovery
 - 单智能体、同步、每轮最多执行一个工具；供应商一次返回多个 `tool_calls` 时只执行
   第一个，其余以可恢复失败观察回写。
 - 无持久化、暂停/恢复、异步或并行工具调度。
-- 知识检索是模块内固定的内置知识库，不是向量数据库或 RAG 平台。
+- 默认知识检索是模块内固定字典；R-07 场景提供固定 NDJSON 语料的 BM25 检索
+  （`runbook_search`），同样不是向量数据库或 RAG 平台。
 - 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
   UTF-8 文本并截断超长内容。
 - 只接入 DeepSeek 与 OpenAI 两个供应商（均走 OpenAI 兼容 Chat Completions
@@ -222,6 +237,22 @@ uv run self-react example failure-recovery
 > 收尾调整（2026-08-11）：按用户要求，`--stream` 只输出最终回答，且从
 > 流式增量中实时逐字打印（不再打印逐步决策/工具调用/观察）；完整轨迹仍由
 > `--show-trace` 提供。
+
+### 日志/故障排查场景（Day 26）
+
+`self-react example log-*` 三条场景示例离线确定，最终回答要点：
+
+| 示例 | 轨迹主线 | 最终回答要点 |
+| --- | --- | --- |
+| `log-5xx-spike` | log_query 总量/过滤 -> calculator 占比 -> 聚合错误码 -> runbook_search -> 最终回答 | 500 错误 5 条、占 12.5%，根因假设为连接池耗尽或发布回归 |
+| `log-error-window` | log_query(group_by=hour) -> 最终回答 | 503 集中在 11:00 整点桶（5 条） |
+| `log-release-correlation` | 时间窗过滤 + file_reader 发布记录 -> 最终回答 | 500 错误起点与 checkout 10:00 发布重合，判断相关 |
+
+真实 DeepSeek（`deepseek-v4-flash`）用 `--scenario log-troubleshooting` 执行
+“排查 checkout 5xx 突增”任务，以 `FINAL_ANSWER` 结束：模型依次调用
+`log_query(group_by=error_code)`、`runbook_search`、`log_query(group_by=hour)`、
+按错误码过滤与 `keyword` 过滤，最终给出“数据库连接池耗尽”的根因假设与
+回滚/扩容/限流等下一步动作。真实调用结果非确定性，不作为自动化测试前置条件。
 
 ### 3分钟讲解
 

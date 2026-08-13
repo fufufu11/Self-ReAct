@@ -17,7 +17,9 @@ from self_react.tools.base import (
 from self_react.tools.calculator import CalculatorTool
 from self_react.tools.file_reader import FileReaderTool
 from self_react.tools.final_answer import FinalAnswerTool
+from self_react.tools.log_query import LogQueryTool
 from self_react.tools.retrieve import RetrieveTool
+from self_react.tools.runbook_search import RunbookEntry, RunbookSearchTool
 from self_react.tools.schema import generate_parameters_schema
 
 __all__ = [
@@ -25,7 +27,10 @@ __all__ = [
     "DEFAULT_PARAMETERS_SCHEMA",
     "FileReaderTool",
     "FinalAnswerTool",
+    "LogQueryTool",
     "RetrieveTool",
+    "RunbookEntry",
+    "RunbookSearchTool",
     "Tool",
     "ToolArgumentError",
     "ToolExecutionError",
