@@ -1,0 +1,4 @@
+{"id":"RB-500","error_code":"500","service":"checkout","title":"checkout 服务 500 错误突增排查","causes":["下游数据库连接池耗尽","最近发布引入回归","配置错误"],"checks":["对比发布窗口与错误率起点","查看数据库连接池使用率","检查最近一次发布的变更"],"actions":["回滚最近发布","扩容数据库连接池","修复配置"]}
+{"id":"RB-502","error_code":"502","service":"checkout","title":"checkout 服务 502 网关错误排查","causes":["上游服务超时","网关连接耗尽"],"checks":["查看上游依赖延迟","检查网关连接数"],"actions":["增加上游超时时间","扩容网关连接"]}
+{"id":"RB-503","error_code":"503","service":"checkout","title":"checkout 服务 503 服务不可用排查","causes":["服务过载","连接池耗尽"],"checks":["查看请求并发","检查错误集中出现的时间窗口"],"actions":["限流","扩容实例"]}
+{"id":"RB-504","error_code":"504","service":"payment","title":"payment 服务 504 网关超时排查","causes":["下游支付网关超时"],"checks":["查看支付网关延迟","检查超时配置"],"actions":["上调超时时间","联系支付网关"]}

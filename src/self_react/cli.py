@@ -29,6 +29,14 @@ from self_react.llm import LLM, LLMError, LLMProviderError, StreamChunk
 from self_react.memory import DEFAULT_CONTEXT_WINDOW, ContextPolicy
 from self_react.models import TerminationReason
 from self_react.providers import available_providers, create_provider
+from self_react.scenarios.log_troubleshooting import (
+    SCENARIO_EXAMPLES,
+    SCENARIO_NAME,
+    run_scenario_example,
+)
+from self_react.scenarios.log_troubleshooting import (
+    build_registry as build_log_troubleshooting_registry,
+)
 from self_react.tools import (
     CalculatorTool,
     FileReaderTool,
@@ -46,6 +54,9 @@ DEFAULT_MAX_STEPS = 5
 
 _MODEL_CHOICES = available_providers()
 """``--model`` 可选的模型名：来自 provider 注册表（按名称排序）。"""
+
+_SCENARIO_CHOICES = (SCENARIO_NAME,)
+"""``--scenario`` 可选的场景工具包标识。"""
 
 _TERMINATION_LABELS: dict[TerminationReason, str] = {
     TerminationReason.FINAL_ANSWER: "最终回答",
@@ -339,17 +350,26 @@ def _create_parser() -> argparse.ArgumentParser:
             "默认关闭，不影响既有输出。"
         ),
     )
+    run_parser.add_argument(
+        "--scenario",
+        choices=_SCENARIO_CHOICES,
+        default=None,
+        help=(
+            "选择场景工具包；不指定时使用默认四个工具。当前可选：log-troubleshooting。"
+        ),
+    )
     example_parser = subcommands.add_parser(
         "example",
         help="运行 Day 16 确定性端到端示例（无需网络与 API Key）。",
     )
     example_parser.add_argument(
         "name",
-        choices=sorted(EXAMPLES),
+        choices=sorted([*EXAMPLES, *SCENARIO_EXAMPLES]),
         metavar="NAME",
         help=(
             "示例名称：single-tool（单工具）、multi-tool（多工具）、"
-            "failure-recovery（工具失败后恢复）。"
+            "failure-recovery（工具失败后恢复）、log-5xx-spike、"
+            "log-error-window、log-release-correlation。"
         ),
     )
     return parser
@@ -364,7 +384,11 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
         print(f"模型配置失败：{exc}", file=sys.stderr)
         return 2
 
-    registry = _build_registry()
+    registry = (
+        _build_registry()
+        if arguments.scenario is None
+        else build_log_troubleshooting_registry()
+    )
     agent = Agent(
         llm=llm,
         registry=registry,
@@ -411,10 +435,15 @@ def _example_command(arguments: argparse.Namespace) -> int:
     （单工具、多工具、工具失败后恢复）可以离线复现。
     """
 
-    scenario = EXAMPLES[arguments.name]
-    state = run_example(arguments.name)
+    name = arguments.name
+    if name in EXAMPLES:
+        title = EXAMPLES[name].title
+        state = run_example(name)
+    else:
+        title = SCENARIO_EXAMPLES[name].title
+        state = run_scenario_example(name)
 
-    print(f"=== 示例：{scenario.title}（{scenario.name}） ===")
+    print(f"=== 示例：{title}（{name}） ===")
     if state.final_answer is not None:
         print(f"最终回答：{state.final_answer.content}")
     elif state.termination_reason is not None:

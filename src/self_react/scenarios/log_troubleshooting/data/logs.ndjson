@@ -1,0 +1,80 @@
+{"timestamp":"2026-08-12 09:00:00","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 09:00:01","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 09:00:02","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 09:00:03","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 09:00:04","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 10:00:00","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 10:00:01","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 10:00:02","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 10:00:03","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 10:00:04","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 11:00:00","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 11:00:01","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 11:00:02","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 11:00:03","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 11:00:04","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 12:00:00","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 12:00:01","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 12:00:02","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 12:00:03","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 12:00:04","service":"auth","level":"INFO","error_code":null,"message":"登录请求成功"}
+{"timestamp":"2026-08-12 09:10:00","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 09:10:01","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 09:10:02","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 09:10:03","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 09:10:04","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 10:10:00","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 10:10:01","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 10:10:02","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 10:10:03","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 10:10:04","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 11:10:00","service":"payment","level":"ERROR","error_code":"504","message":"支付网关超时"}
+{"timestamp":"2026-08-12 11:10:01","service":"payment","level":"ERROR","error_code":"504","message":"支付网关超时"}
+{"timestamp":"2026-08-12 11:10:02","service":"payment","level":"ERROR","error_code":"504","message":"支付网关超时"}
+{"timestamp":"2026-08-12 11:10:03","service":"payment","level":"WARN","error_code":null,"message":"支付网关响应变慢"}
+{"timestamp":"2026-08-12 11:10:04","service":"payment","level":"WARN","error_code":null,"message":"支付网关响应变慢"}
+{"timestamp":"2026-08-12 12:10:00","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 12:10:01","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 12:10:02","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 12:10:03","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 12:10:04","service":"payment","level":"INFO","error_code":null,"message":"支付请求成功"}
+{"timestamp":"2026-08-12 09:20:00","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:01","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:02","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:03","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:04","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:05","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:06","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:07","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:08","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 09:20:09","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 10:20:00","service":"checkout","level":"ERROR","error_code":"500","message":"处理请求失败：数据库连接超时"}
+{"timestamp":"2026-08-12 10:20:01","service":"checkout","level":"ERROR","error_code":"502","message":"上游服务返回 502"}
+{"timestamp":"2026-08-12 10:20:02","service":"checkout","level":"ERROR","error_code":"500","message":"处理请求失败：数据库连接超时"}
+{"timestamp":"2026-08-12 10:20:03","service":"checkout","level":"ERROR","error_code":"502","message":"上游服务返回 502"}
+{"timestamp":"2026-08-12 10:20:04","service":"checkout","level":"ERROR","error_code":"500","message":"处理请求失败：数据库连接超时"}
+{"timestamp":"2026-08-12 10:20:05","service":"checkout","level":"ERROR","error_code":"502","message":"上游服务返回 502"}
+{"timestamp":"2026-08-12 10:20:06","service":"checkout","level":"ERROR","error_code":"500","message":"处理请求失败：数据库连接超时"}
+{"timestamp":"2026-08-12 10:20:07","service":"checkout","level":"ERROR","error_code":"502","message":"上游服务返回 502"}
+{"timestamp":"2026-08-12 10:20:08","service":"checkout","level":"ERROR","error_code":"500","message":"处理请求失败：数据库连接超时"}
+{"timestamp":"2026-08-12 10:20:09","service":"checkout","level":"ERROR","error_code":"502","message":"上游服务返回 502"}
+{"timestamp":"2026-08-12 10:20:10","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 10:20:11","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 10:20:12","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 10:20:13","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 10:20:14","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 11:20:00","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 11:20:01","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 11:20:02","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 11:20:03","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 11:20:04","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 11:20:05","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 11:20:06","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 11:20:07","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 11:20:08","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 11:20:09","service":"checkout","level":"WARN","error_code":null,"message":"checkout 请求延迟升高"}
+{"timestamp":"2026-08-12 12:20:00","service":"checkout","level":"ERROR","error_code":"503","message":"服务暂时不可用"}
+{"timestamp":"2026-08-12 12:20:01","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 12:20:02","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 12:20:03","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
+{"timestamp":"2026-08-12 12:20:04","service":"checkout","level":"INFO","error_code":null,"message":"GET /checkout 处理成功"}
