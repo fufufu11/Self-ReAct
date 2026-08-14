@@ -1,4 +1,4 @@
-"""R-07 日志/故障排查场景的公开行为测试。"""
+"""R-07/R-08 日志/故障排查场景的公开行为测试。"""
 
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ def test_scenario_example_final_answers_are_stable() -> None:
         name: run_scenario_example(name).final_answer for name in SCENARIO_EXAMPLES
     }
 
-    assert "12.5%" in answers["log-5xx-spike"].content
-    assert "11:00" in answers["log-error-window"].content
+    assert "10.9%" in answers["log-5xx-spike"].content
+    assert "10:49" in answers["log-error-window"].content
     assert "发布相关" in answers["log-release-correlation"].content
 
 
@@ -76,31 +76,29 @@ def test_scenario_examples_tool_calls_succeed() -> None:
 
 
 def test_scenario_log_data_matches_expected_counts() -> None:
-    """合成日志的真实计数满足示例设计。"""
+    """真实日志 fixture 的计数满足示例设计。"""
 
     registry = build_registry()
     log_query = registry.get("log_query")
     assert log_query is not None
 
-    checkout = log_query.execute({"path": "logs.ndjson", "service": "checkout"})
-    assert "匹配 40 条 / 共 80 条" in checkout
+    cgi_bin = log_query.execute({"path": "logs.ndjson", "service": "cgi-bin"})
+    assert "匹配 487 条 / 共 14130 条" in cgi_bin
 
     five_hundred = log_query.execute(
-        {"path": "logs.ndjson", "service": "checkout", "error_code": "500"}
+        {"path": "logs.ndjson", "service": "cgi-bin", "error_code": "500"}
     )
-    assert "匹配 5 条 / 共 80 条" in five_hundred
+    assert "匹配 53 条 / 共 14130 条" in five_hundred
 
     error_distribution = log_query.execute(
         {
             "path": "logs.ndjson",
-            "service": "checkout",
+            "service": "cgi-bin",
             "level": "ERROR",
             "group_by": "error_code",
         }
     )
-    assert "503: 7" in error_distribution
-    assert "500: 5" in error_distribution
-    assert "502: 5" in error_distribution
+    assert "500: 53" in error_distribution
 
 
 def test_scenario_deploys_readable_via_file_reader() -> None:
@@ -112,9 +110,9 @@ def test_scenario_deploys_readable_via_file_reader() -> None:
 
     content = file_reader.execute({"path": "deploys.ndjson"})
 
-    assert "checkout" in content
-    assert "1.2.0" in content
-    assert "2026-08-12 10:00:00" in content
+    assert "cgi-bin" in content
+    assert "geturlstats 1.1.0" in content
+    assert "1995-07-03 10:00:00" in content
 
 
 def test_build_example_llm_returns_llm_protocol_adapter() -> None:

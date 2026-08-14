@@ -130,7 +130,7 @@ uv run self-react example log-release-correlation
 用真实模型跑日志/故障排查场景时加上 `--scenario`：
 
 ```powershell
-uv run self-react run "排查 checkout 服务的 5xx 错误突增" `
+uv run self-react run "排查 cgi-bin 服务的 500 错误突增" `
   --model deepseek --scenario log-troubleshooting --show-trace
 ```
 
@@ -165,7 +165,7 @@ uv run self-react run "排查 checkout 服务的 5xx 错误突增" `
 | `cli.py` | `hello` / `run` / `example` 命令入口 |
 | `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |
 | `tools/` | `Tool` 协议、`ToolRegistry`、参数 Schema 自动生成与预校验，以及 calculator、file_reader、retrieve、log_query、runbook_search、final_answer |
-| `scenarios/` | 应用场景子包；`log_troubleshooting` 提供固定日志/runbook 数据、工具组装与三个确定性示例 |
+| `scenarios/` | 应用场景子包；`log_troubleshooting` 提供真实日志 fixture（NASA HTTP 日志片段）与 runbook/发布记录、工具组装与三个确定性示例 |
 
 领域上下文与概念边界见 [`CONTEXT.md`](CONTEXT.md)；核心循环的完整调研与状态图见
 [`docs/architecture/react-loop.md`](docs/architecture/react-loop.md)；每个模块的
@@ -179,8 +179,10 @@ uv run self-react run "排查 checkout 服务的 5xx 错误突增" `
 - 单智能体、同步、每轮最多执行一个工具；供应商一次返回多个 `tool_calls` 时只执行
   第一个，其余以可恢复失败观察回写。
 - 无持久化、暂停/恢复、异步或并行工具调度。
-- 默认知识检索是模块内固定字典；R-07 场景提供固定 NDJSON 语料的 BM25 检索
-  （`runbook_search`），同样不是向量数据库或 RAG 平台。
+- 默认知识检索是模块内固定字典；R-07/R-08 场景提供固定 NDJSON 语料的 BM25 检索
+  （`runbook_search`），同样不是向量数据库或 RAG 平台；日志 fixture 是公共领域
+  真实访问日志的固定时间窗片段（见 `docs/architecture/day-27-*` 与场景内
+  `data/PROVENANCE.md`）。
 - 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
   UTF-8 文本并截断超长内容。
 - 只接入 DeepSeek 与 OpenAI 两个供应商（均走 OpenAI 兼容 Chat Completions
@@ -244,15 +246,34 @@ uv run self-react run "排查 checkout 服务的 5xx 错误突增" `
 
 | 示例 | 轨迹主线 | 最终回答要点 |
 | --- | --- | --- |
-| `log-5xx-spike` | log_query 总量/过滤 -> calculator 占比 -> 聚合错误码 -> runbook_search -> 最终回答 | 500 错误 5 条、占 12.5%，根因假设为连接池耗尽或发布回归 |
-| `log-error-window` | log_query(group_by=hour) -> 最终回答 | 503 集中在 11:00 整点桶（5 条） |
-| `log-release-correlation` | 时间窗过滤 + file_reader 发布记录 -> 最终回答 | 500 错误起点与 checkout 10:00 发布重合，判断相关 |
+| `log-5xx-spike` | log_query 总量/过滤 -> calculator 占比 -> 聚合错误码 -> runbook_search -> 最终回答 | geturlstats.pl 53 条 500、占 cgi-bin 日志约 10.9%，集中在 10:49-10:52 |
+| `log-error-window` | log_query(group_by=hour) -> 最终回答 | 500 集中在 1995-07-03 10:00 整点桶（53 条），09:00/11:00 桶为 0 |
+| `log-release-correlation` | 时间窗过滤 + file_reader 发布记录 -> 最终回答 | 500 起点 10:49 与 cgi-bin 10:00 发布 geturlstats 1.1.0 重合，判断相关 |
 
 真实 DeepSeek（`deepseek-v4-flash`）用 `--scenario log-troubleshooting` 执行
-“排查 checkout 5xx 突增”任务，以 `FINAL_ANSWER` 结束：模型依次调用
+“排查 cgi-bin 500 突增”任务，以 `FINAL_ANSWER` 结束：模型依次调用
 `log_query(group_by=error_code)`、`runbook_search`、`log_query(group_by=hour)`、
-按错误码过滤与 `keyword` 过滤，最终给出“数据库连接池耗尽”的根因假设与
-回滚/扩容/限流等下一步动作。真实调用结果非确定性，不作为自动化测试前置条件。
+按错误码过滤与 `keyword` 过滤，最终给出根因假设与回滚/修复等下一步动作。
+真实调用结果非确定性，不作为自动化测试前置条件。
+
+### 真实日志场景（Day 27）
+
+R-08 把合成日志替换为真实数据：NASA Kennedy Space Center WWW 服务器 1995-07
+访问日志（公共领域、可自由再分发）的固定 3 小时窗口（`1995-07-03 09:00-11:59`，
+14,130 行），包含真实故障“`GET /cgi-bin/geturlstats.pl` 在 10:49-10:52 连续
+返回 53 次 HTTP 500”。来源、许可与规范化规则见
+[`data/PROVENANCE.md`](src/self_react/scenarios/log_troubleshooting/data/PROVENANCE.md)
+与 [`ADR 0002`](docs/adr/0002-real-log-fixture.md)。
+
+2026-08-14 用真实 DeepSeek（`deepseek-v4-flash`）验收两条任务：
+
+| 任务 | 真实轨迹 | 步数 | 结果 |
+| --- | --- | --- | --- |
+| 找出错误码 500 集中出现的时间窗口 | log_query(group_by=hour) -> log_query 精确查询 -> 最终回答 | 4 / 5 | 锁定 1995-07-03 10:49:40 ~ 10:50:26 窗口 |
+| 排查 cgi-bin 服务的 500 错误突增 | log_query / runbook_search 多次调用 | 5 / 5（8/8） | 步数耗尽（MAX_STEPS_EXCEEDED），未在预算内给出最终回答 |
+
+真实调用结果非确定性：聚焦任务可完成，开放排查任务可能耗尽 `max_steps` 预算
+并被框架明确终止，不作为自动化测试前置条件。
 
 ### 3分钟讲解
 
