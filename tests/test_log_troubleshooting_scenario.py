@@ -1,4 +1,4 @@
-"""R-07/R-08 日志/故障排查场景的公开行为测试。"""
+"""R-07~R-09 日志/故障排查场景的公开行为测试。"""
 
 from __future__ import annotations
 
@@ -60,9 +60,9 @@ def test_scenario_example_final_answers_are_stable() -> None:
         name: run_scenario_example(name).final_answer for name in SCENARIO_EXAMPLES
     }
 
-    assert "10.9%" in answers["log-5xx-spike"].content
-    assert "10:49" in answers["log-error-window"].content
-    assert "发布相关" in answers["log-release-correlation"].content
+    assert "79.1%" in answers["log-404-spike"].content
+    assert "03:14" in answers["log-error-window"].content
+    assert "无关" in answers["log-release-correlation"].content
 
 
 def test_scenario_examples_tool_calls_succeed() -> None:
@@ -82,23 +82,26 @@ def test_scenario_log_data_matches_expected_counts() -> None:
     log_query = registry.get("log_query")
     assert log_query is not None
 
-    cgi_bin = log_query.execute({"path": "logs.ndjson", "service": "cgi-bin"})
-    assert "匹配 487 条 / 共 14130 条" in cgi_bin
+    not_found = log_query.execute({"path": "logs.ndjson", "error_code": "404"})
+    assert "匹配 736 条 / 共 931 条" in not_found
 
-    five_hundred = log_query.execute(
-        {"path": "logs.ndjson", "service": "cgi-bin", "error_code": "500"}
+    spike_window = log_query.execute(
+        {
+            "path": "logs.ndjson",
+            "error_code": "404",
+            "time_start": "2021-12-17 03:14:00",
+            "time_end": "2021-12-17 03:18:59",
+        }
     )
-    assert "匹配 53 条 / 共 14130 条" in five_hundred
+    assert "匹配 733 条 / 共 931 条" in spike_window
 
     error_distribution = log_query.execute(
         {
             "path": "logs.ndjson",
-            "service": "cgi-bin",
-            "level": "ERROR",
             "group_by": "error_code",
         }
     )
-    assert "500: 53" in error_distribution
+    assert "404: 736" in error_distribution
 
 
 def test_scenario_deploys_readable_via_file_reader() -> None:
@@ -110,9 +113,9 @@ def test_scenario_deploys_readable_via_file_reader() -> None:
 
     content = file_reader.execute({"path": "deploys.ndjson"})
 
-    assert "cgi-bin" in content
-    assert "geturlstats 1.1.0" in content
-    assert "1995-07-03 10:00:00" in content
+    assert "jet" in content
+    assert "1.2.0" in content
+    assert "2021-12-16 22:00:00" in content
 
 
 def test_build_example_llm_returns_llm_protocol_adapter() -> None:
