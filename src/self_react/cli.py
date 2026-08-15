@@ -368,7 +368,7 @@ def _create_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "示例名称：single-tool（单工具）、multi-tool（多工具）、"
-            "failure-recovery（工具失败后恢复）、log-5xx-spike、"
+            "failure-recovery（工具失败后恢复）、log-404-spike、"
             "log-error-window、log-release-correlation。"
         ),
     )

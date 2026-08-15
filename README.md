@@ -117,7 +117,7 @@ uv run self-react run "演示任务" --model fake --show-trace
 uv run self-react example single-tool
 uv run self-react example multi-tool
 uv run self-react example failure-recovery
-uv run self-react example log-5xx-spike
+uv run self-react example log-404-spike
 uv run self-react example log-error-window
 uv run self-react example log-release-correlation
 ```
@@ -130,7 +130,7 @@ uv run self-react example log-release-correlation
 用真实模型跑日志/故障排查场景时加上 `--scenario`：
 
 ```powershell
-uv run self-react run "排查 cgi-bin 服务的 500 错误突增" `
+uv run self-react run "排查 promjet 网站 2021-12-17 凌晨的 404 突增，判断是外部扫描还是应用故障" `
   --model deepseek --scenario log-troubleshooting --show-trace
 ```
 
@@ -165,7 +165,7 @@ uv run self-react run "排查 cgi-bin 服务的 500 错误突增" `
 | `cli.py` | `hello` / `run` / `example` 命令入口 |
 | `examples.py` | Day 16 三个确定性端到端示例（数据 + 组合） |
 | `tools/` | `Tool` 协议、`ToolRegistry`、参数 Schema 自动生成与预校验，以及 calculator、file_reader、retrieve、log_query、runbook_search、final_answer |
-| `scenarios/` | 应用场景子包；`log_troubleshooting` 提供真实日志 fixture（NASA HTTP 日志片段）与 runbook/发布记录、工具组装与三个确定性示例 |
+| `scenarios/` | 应用场景子包；`log_troubleshooting` 提供真实日志 fixture（promjet 2021-12 Apache 日志片段）与 runbook/发布记录、工具组装与三个确定性示例 |
 
 领域上下文与概念边界见 [`CONTEXT.md`](CONTEXT.md)；核心循环的完整调研与状态图见
 [`docs/architecture/react-loop.md`](docs/architecture/react-loop.md)；每个模块的
@@ -179,10 +179,10 @@ uv run self-react run "排查 cgi-bin 服务的 500 错误突增" `
 - 单智能体、同步、每轮最多执行一个工具；供应商一次返回多个 `tool_calls` 时只执行
   第一个，其余以可恢复失败观察回写。
 - 无持久化、暂停/恢复、异步或并行工具调度。
-- 默认知识检索是模块内固定字典；R-07/R-08 场景提供固定 NDJSON 语料的 BM25 检索
-  （`runbook_search`），同样不是向量数据库或 RAG 平台；日志 fixture 是公共领域
-  真实访问日志的固定时间窗片段（见 `docs/architecture/day-27-*` 与场景内
-  `data/PROVENANCE.md`）。
+- 默认知识检索是模块内固定字典；R-07~R-09 场景提供固定 NDJSON 语料的 BM25
+  检索（`runbook_search`），同样不是向量数据库或 RAG 平台；日志 fixture 是
+  MIT 许可真实访问日志的固定时间窗片段（见 `docs/architecture/day-27-*`、
+  `docs/architecture/day-28-*` 与场景内 `data/PROVENANCE.md`）。
 - 文件读取被限制在构造时指定的根目录内（CLI 演示固定为 `C:/allowed`），只读
   UTF-8 文本并截断超长内容。
 - 只接入 DeepSeek 与 OpenAI 两个供应商（均走 OpenAI 兼容 Chat Completions
@@ -246,15 +246,13 @@ uv run self-react run "排查 cgi-bin 服务的 500 错误突增" `
 
 | 示例 | 轨迹主线 | 最终回答要点 |
 | --- | --- | --- |
-| `log-5xx-spike` | log_query 总量/过滤 -> calculator 占比 -> 聚合错误码 -> runbook_search -> 最终回答 | geturlstats.pl 53 条 500、占 cgi-bin 日志约 10.9%，集中在 10:49-10:52 |
-| `log-error-window` | log_query(group_by=hour) -> 最终回答 | 500 集中在 1995-07-03 10:00 整点桶（53 条），09:00/11:00 桶为 0 |
-| `log-release-correlation` | 时间窗过滤 + file_reader 发布记录 -> 最终回答 | 500 起点 10:49 与 cgi-bin 10:00 发布 geturlstats 1.1.0 重合，判断相关 |
+| `log-404-spike` | log_query 过滤 -> 时间窗过滤 -> calculator 占比 -> runbook_search -> 最终回答 | 736 条 404、占该小时约 79.1%，733 条集中在 03:14-03:18，外部扫描探测 |
+| `log-error-window` | log_query(group_by=hour) -> 时间窗过滤 -> 最终回答 | 404 集中在 2021-12-17 03 点小时桶（736 条），其中 733 条在 03:14-03:18 |
+| `log-release-correlation` | 时间窗过滤 + file_reader 发布记录 -> 最终回答 | 404 突增起点 03:14 与 jet 1.2.0（12-16 22:00 发布）不重合，判断与发布无关 |
 
 真实 DeepSeek（`deepseek-v4-flash`）用 `--scenario log-troubleshooting` 执行
-“排查 cgi-bin 500 突增”任务，以 `FINAL_ANSWER` 结束：模型依次调用
-`log_query(group_by=error_code)`、`runbook_search`、`log_query(group_by=hour)`、
-按错误码过滤与 `keyword` 过滤，最终给出根因假设与回滚/修复等下一步动作。
-真实调用结果非确定性，不作为自动化测试前置条件。
+404 突增排查任务，真实调用结果非确定性，不作为自动化测试前置条件；最新验收
+记录见下方 Day 28 小节。
 
 ### 真实日志场景（Day 27）
 
@@ -274,6 +272,27 @@ R-08 把合成日志替换为真实数据：NASA Kennedy Space Center WWW 服务
 
 真实调用结果非确定性：聚焦任务可完成，开放排查任务可能耗尽 `max_steps` 预算
 并被框架明确终止，不作为自动化测试前置条件。
+
+### 真实日志场景（Day 28 / R-09）
+
+R-09 用 promjet.ru 2021-12 真实 Apache 访问日志（GitHub
+`vberkutovv/ApacheLog-Dataset`，MIT，©2019 InterSystems Developer Community）
+替换 NASA 数据：固定 1 小时窗口（`2021-12-17 03:00-03:59`，931 行），包含
+真实事件“03:14-03:18 五分钟 733 条 HTTP 404，整站备份/源码文件探测、多 IP
+并发，疑似外部扫描”。示例 `log-5xx-spike` 更名为 `log-404-spike`，三个示例
+叙事改为 404 突增 + 外部扫描甄别；runbook 改为 RB-404/403/503。来源、许可与
+规范化规则见 [`data/PROVENANCE.md`](src/self_react/scenarios/log_troubleshooting/data/PROVENANCE.md)
+与 [`ADR 0003`](docs/adr/0003-promjet-log-fixture.md)。
+
+2026-08-15 用真实 DeepSeek（`deepseek-v4-flash`）验收：
+
+| 任务 | 真实轨迹 | 步数 | 结果 |
+| --- | --- | --- | --- |
+| 排查 promjet 网站 2021-12-17 凌晨的 404 突增，判断是外部扫描还是应用故障 | log_query×4（hour/error_code/service/keyword=backup）-> runbook_search | 5 / 5 | 步数耗尽；已识别 404×736 与备份/源码探测并命中 RB-404，未给出最终回答 |
+| 找出 2021-12-17 凌晨 404 集中出现的时间窗口 | log_query 路径猜错×2 -> keyword=404 0 命中 -> 全量 -> error_code=404 聚合 | 5 / 5 | 步数耗尽；最后一步才用对 error_code 过滤（03 点桶 736） |
+
+两条任务均在 5 步预算内耗尽并被框架明确终止（与 R-08 实测一致），真实调用
+结果非确定性，如实记录，不作为自动化测试前置条件。
 
 ### 3分钟讲解
 

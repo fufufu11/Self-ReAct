@@ -2,7 +2,7 @@
 
 ## Status
 
-accepted
+accepted（superseded by 0003）
 
 ## Context
 
