@@ -476,6 +476,50 @@ def test_openai_complete_stream_assembles_tool_call_from_fragments() -> None:
     ]
 
 
+def test_openai_complete_stream_streams_final_answer_content_live() -> None:
+    """final_answer 工具调用时 content 参数增量实时经 final_answer_content 透出。"""
+
+    client = RecordingClient(
+        response=[
+            _stream_delta_chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call-9",
+                        "type": "function",
+                        "function": {"name": "final_answer", "arguments": ""},
+                    }
+                ]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": '{"content": "2 '}}]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": "+ 2 = "}}]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": '4。"}'}}]
+            ),
+        ]
+    )
+    llm = OpenAILLM(client=client)
+
+    chunks = list(
+        llm.complete_stream([Message(role=MessageRole.USER, content="计算 2 + 2")])
+    )
+
+    assert "".join(chunk.final_answer_content for chunk in chunks) == "2 + 2 = 4。"
+    message = collect_stream(chunks)
+    assert message.content == ""
+    assert message.tool_calls == [
+        ToolCall(
+            call_id="call-9",
+            name="final_answer",
+            arguments={"content": "2 + 2 = 4。"},
+        )
+    ]
+
+
 def test_openai_complete_stream_maps_create_error_to_stable_code() -> None:
     """发起流式请求失败时映射稳定错误类别，不泄漏 SDK 文本。"""
 

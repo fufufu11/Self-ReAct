@@ -84,9 +84,12 @@ _JSON_ESCAPES = {
 class _FinalAnswerStreamRenderer:
     """从流式增量中实时提取 ``final_answer`` 的 ``content`` 并逐字打印。
 
-    只消费内容增量（``StreamChunk.content``）；工具调用轮次、解析重试等
-    中间响应不打印任何内容。无法实时提取时（例如原生 ``final_answer``
-    工具调用），由 :meth:`finish` 在运行结束后补齐最终回答文本。
+    消费两类增量：``chunk.final_answer_content``（真实模型原生
+    ``final_answer`` 工具调用的 ``content`` 参数增量，已由
+    ``StreamAccumulator`` 提取成纯文本）直接打印；``chunk.content``（文本
+    JSON 形态，离线示例 / FakeLLM 路径）走逐字符 JSON 扫描。工具调用轮次、
+    解析重试等中间响应不打印任何内容。无法实时提取的极少数情况由
+    :meth:`finish` 在运行结束后补齐最终回答文本。
     """
 
     def __init__(self) -> None:
@@ -104,8 +107,15 @@ class _FinalAnswerStreamRenderer:
         self._printed = ""
 
     def __call__(self, chunk: StreamChunk) -> None:
-        """消费一个增量块，并尽可能实时打印最终回答内容。"""
+        """消费一个增量块，并尽可能实时打印最终回答内容。
 
+        原生 ``final_answer`` 增量与文本 JSON 增量在真实响应中互斥；同时
+        出现时都打印。原生增量打印后 ``_printed`` 同步推进，因此
+        :meth:`finish` 不会重复输出。
+        """
+
+        if chunk.final_answer_content:
+            self._write(chunk.final_answer_content)
         if not chunk.content:
             return
         self._buffer += chunk.content

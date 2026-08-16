@@ -526,3 +526,50 @@ def test_stream_renderer_finish_prints_missing_remainder(
     renderer = _FinalAnswerStreamRenderer()
     renderer.finish("2 + 2 = 4")
     assert capsys.readouterr().out == "2 + 2 = 4"
+
+
+def test_stream_renderer_prints_native_final_answer_content_live(
+    capsys: CaptureFixture[str],
+) -> None:
+    """原生 final_answer 增量块实时打印，且 finish 不重复输出。"""
+
+    from self_react.cli import _FinalAnswerStreamRenderer
+
+    renderer = _FinalAnswerStreamRenderer()
+    expected = "2 + 2 = 4。"
+    printed = ""
+    for index in range(0, len(expected), 8):
+        renderer(
+            StreamChunk(content="", final_answer_content=expected[index : index + 8])
+        )
+        printed += capsys.readouterr().out
+        assert expected.startswith(printed), printed
+    renderer.finish(expected)
+    assert capsys.readouterr().out == ""
+    assert printed == expected
+
+
+def test_run_stream_native_final_answer_prints_answer_once(
+    capsys: CaptureFixture[str],
+) -> None:
+    """真实模型形态（原生 final_answer 工具调用）在 --stream 下实时打印且不重复。"""
+
+    from self_react.models import ToolCall
+
+    call = ToolCall(
+        call_id="call-1",
+        name="final_answer",
+        arguments={"content": "2 + 2 = 4。"},
+    )
+    llm = FakeLLM([Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call])])
+
+    exit_code = main(
+        ["run", "计算 2 + 2", "--stream"],
+        build_llm=lambda model, max_steps, task: llm,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert captured.out == "2 + 2 = 4。\n"
+    assert captured.out.count("2 + 2 = 4。") == 1
