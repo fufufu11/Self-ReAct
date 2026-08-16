@@ -1234,3 +1234,25 @@ def test_run_rejects_invalid_stream_callbacks() -> None:
         agent.run("任务", stream=True, on_chunk=object())  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         agent.run("任务", on_step=object())  # type: ignore[arg-type]
+
+
+def test_stream_mode_native_final_answer_terminates_with_final_answer() -> None:
+    """原生 final_answer 工具调用（真实模型形态）在流式模式下正常终止。"""
+
+    call = ToolCall(
+        call_id="call-1",
+        name="final_answer",
+        arguments={"content": "完成。"},
+    )
+    presets = [Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call])]
+    registry = _default_registry()
+
+    state = Agent(llm=FakeLLM(presets), registry=registry, max_steps=3).run(
+        "回答我", stream=True
+    )
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.final_answer == FinalAnswer(content="完成。")
+    assert state.steps_used == 1
+    assert len(state.trace) == 1
+    assert state.trace[0].decision == FinalAnswer(content="完成。")

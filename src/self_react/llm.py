@@ -94,13 +94,17 @@ FAKE_STREAM_CHUNK_SIZE = 8
 class StreamChunk:
     """一次流式调用中的一段增量数据。
 
-    ``content`` 是本块新增的文本片段（可为空串）；``tool_calls`` 是到当前
-    块为止已完成组装的工具调用，通常只在最后一个块出现。调用方可以消费
-    ``content`` 做实时展示，最终用 :func:`collect_stream` 组装出与
-    ``complete`` 等价的 assistant Message。
+    ``content`` 是本块新增的文本片段（可为空串）；``final_answer_content``
+    是本块携带的原生 ``final_answer`` 工具调用 ``content`` 参数增量——已从
+    跨块累积的 arguments JSON 片段中提取出的纯文本，仅供流式渲染实时展示，
+    不参与 :func:`collect_stream` 的消息组装；``tool_calls`` 是到当前块为止
+    已完成组装的工具调用，通常只在最后一个块出现。调用方可以消费
+    ``content`` / ``final_answer_content`` 做实时展示，最终用
+    :func:`collect_stream` 组装出与 ``complete`` 等价的 assistant Message。
     """
 
     content: str
+    final_answer_content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
 
     def __post_init__(self) -> None:
@@ -108,6 +112,8 @@ class StreamChunk:
 
         if not isinstance(self.content, str):
             raise TypeError("StreamChunk.content 必须是字符串")
+        if not isinstance(self.final_answer_content, str):
+            raise TypeError("StreamChunk.final_answer_content 必须是字符串")
         if isinstance(self.tool_calls, (str, bytes)) or not isinstance(
             self.tool_calls, tuple
         ):
@@ -236,6 +242,9 @@ class FakeLLM:
         与 ``complete`` 一样先校验并记录调用、按序消耗预置响应；耗尽时报
         ``LLMResponseExhaustedError`` 且计入调用历史。块大小由
         ``FAKE_STREAM_CHUNK_SIZE`` 固定，保证相同输入永远得到相同块序列。
+        预置响应是原生 ``final_answer`` 工具调用时，其 ``content`` 参数值
+        也按同样块大小切块，经 ``final_answer_content`` 增量透出，模拟真实
+        供应商的原生工具调用流式形态。
         """
 
         self._prepare_call(messages, tools)
@@ -245,8 +254,22 @@ class FakeLLM:
         response = self._responses[self._next_response_index]
         self._next_response_index += 1
         content = response.content
+        final_answer_content = ""
+        if len(response.tool_calls) == 1:
+            call = response.tool_calls[0]
+            if call.name == "final_answer" and isinstance(call.arguments, dict):
+                value = call.arguments.get("content")
+                if isinstance(value, str):
+                    final_answer_content = value
         for index in range(0, len(content), FAKE_STREAM_CHUNK_SIZE):
             yield StreamChunk(content=content[index : index + FAKE_STREAM_CHUNK_SIZE])
+        for index in range(0, len(final_answer_content), FAKE_STREAM_CHUNK_SIZE):
+            yield StreamChunk(
+                content="",
+                final_answer_content=final_answer_content[
+                    index : index + FAKE_STREAM_CHUNK_SIZE
+                ],
+            )
         if response.tool_calls:
             yield StreamChunk(
                 content="",

@@ -479,6 +479,92 @@ def test_deepseek_complete_stream_assembles_tool_call_from_fragments() -> None:
     ]
 
 
+def test_deepseek_complete_stream_streams_final_answer_content_live() -> None:
+    """final_answer 工具调用时 content 参数增量实时经 final_answer_content 透出。"""
+
+    client = RecordingClient(
+        response=[
+            _stream_delta_chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call-9",
+                        "type": "function",
+                        "function": {"name": "final_answer", "arguments": ""},
+                    }
+                ]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": '{"content": "2 '}}]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": "+ 2 = "}}]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[{"index": 0, "function": {"arguments": '4。"}'}}]
+            ),
+        ]
+    )
+    llm = DeepSeekLLM(client=client)
+
+    chunks = list(
+        llm.complete_stream([Message(role=MessageRole.USER, content="计算 2 + 2")])
+    )
+
+    assert "".join(chunk.final_answer_content for chunk in chunks) == "2 + 2 = 4。"
+    assert [chunk.content for chunk in chunks] == ["", "", "", ""]
+    assert [chunk.final_answer_content for chunk in chunks] == [
+        "2 ",
+        "+ 2 = ",
+        "4。",
+        "",
+    ]
+    message = collect_stream(chunks)
+    assert message.content == ""
+    assert message.tool_calls == [
+        ToolCall(
+            call_id="call-9",
+            name="final_answer",
+            arguments={"content": "2 + 2 = 4。"},
+        )
+    ]
+
+
+def test_deepseek_complete_stream_non_final_tool_has_no_final_content() -> None:
+    """非 final_answer 工具调用不产生 final_answer_content 增量。"""
+
+    client = RecordingClient(
+        response=[
+            _stream_delta_chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "calculator", "arguments": ""},
+                    }
+                ]
+            ),
+            _stream_delta_chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "function": {"arguments": '{"expression": "2 + 2"}'},
+                    }
+                ]
+            ),
+        ]
+    )
+    llm = DeepSeekLLM(client=client)
+
+    chunks = list(
+        llm.complete_stream([Message(role=MessageRole.USER, content="计算 2 + 2")])
+    )
+
+    assert all(chunk.final_answer_content == "" for chunk in chunks)
+    assert collect_stream(chunks).tool_calls[0].name == "calculator"
+
+
 def test_deepseek_complete_stream_ignores_reasoning_content_delta() -> None:
     """思考模式增量（reasoning_content）被忽略而不崩溃，与 complete 路径一致。"""
 

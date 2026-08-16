@@ -120,7 +120,9 @@ class OpenAILLM:
         tools: Sequence[object] | None = None,
     ) -> Iterator[StreamChunk]:
         """发起一次流式请求，逐块产出内容增量；组装后与 ``complete`` 等价。
-        工具调用参数跨块按 index 增量拼接，在末尾块一次性携带。
+        工具调用参数跨块按 index 增量拼接，``final_answer`` 工具的
+        ``content`` 增量实时经 ``StreamChunk.final_answer_content`` 透出，
+        末尾块仍一次性携带完整工具调用。
         """
 
         payload = serialize_messages(messages)
@@ -143,7 +145,7 @@ class OpenAILLM:
         try:
             for chunk in stream:
                 delta = accumulator.feed(chunk)
-                if delta.content:
+                if delta.content or delta.final_answer_content:
                     yield delta
             message = accumulator.message()
             if message.tool_calls:

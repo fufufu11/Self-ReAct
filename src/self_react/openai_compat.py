@@ -279,6 +279,99 @@ def deserialize_response(response: Any) -> Message:
         raise LLMResponseError("供应商响应无法构造为 assistant Message") from exc
 
 
+_JSON_STRING_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+"""JSON 字符串转义到实际字符的映射（不含 \\u，单独处理）。"""
+
+
+def _read_json_string_prefix(text: str, start: int) -> str:
+    """读取从 ``start`` 开始的 JSON 字符串值的完整前缀（处理转义）。
+
+    值尚未结束时（例如转义序列只到一半）只返回已确定部分，绝不返回半个
+    转义序列；遇到结束引号即停。只做纯文本扫描，不要求文本是完整 JSON。
+    """
+
+    out: list[str] = []
+    i = start
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char == "\\":
+            if i + 1 >= n:
+                break
+            nxt = text[i + 1]
+            if nxt == "u":
+                if i + 5 >= n:
+                    break
+                hex_digits = text[i + 2 : i + 6]
+                try:
+                    out.append(chr(int(hex_digits, 16)))
+                except ValueError:
+                    out.append("\\u" + hex_digits)
+                i += 6
+            else:
+                out.append(_JSON_STRING_ESCAPES.get(nxt, nxt))
+                i += 2
+        elif char == '"':
+            break
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
+def _extract_final_answer_content_prefix(arguments: str) -> str:
+    """从（可能不完整的）``final_answer`` 工具 arguments JSON 片段中提取
+    ``content`` 字符串值的完整前缀。
+
+    ``content`` 键尚未出现、或值还在增量到达时只返回已确定的前缀；
+    只做纯文本扫描，不依赖完整 JSON 可解析。非 ``final_answer`` 工具的
+    参数（例如 ``{"expression": "6 * 7"}``）不含 ``content`` 键，返回空串。
+    """
+
+    i = 0
+    n = len(arguments)
+    while i < n:
+        if arguments[i] != '"':
+            i += 1
+            continue
+        j = i + 1
+        key_chars: list[str] = []
+        while j < n:
+            char = arguments[j]
+            if char == "\\":
+                j += 2
+                continue
+            if char == '"':
+                break
+            key_chars.append(char)
+            j += 1
+        if j >= n:
+            return ""
+        if "".join(key_chars) == "content":
+            k = j + 1
+            while k < n and arguments[k] in " \t\n\r":
+                k += 1
+            if k >= n or arguments[k] != ":":
+                return ""
+            k += 1
+            while k < n and arguments[k] in " \t\n\r":
+                k += 1
+            if k >= n or arguments[k] != '"':
+                return ""
+            return _read_json_string_prefix(arguments, k + 1)
+        i = j + 1
+    return ""
+
+
 class StreamAccumulator:
     """跨流式块累积内容与工具调用参数片段，最终组装为 assistant Message。
 
@@ -287,6 +380,12 @@ class StreamAccumulator:
     全部块消费完毕后返回与 ``complete`` 路径 ``deserialize_response``
     等价的 assistant Message。``reasoning_content``（DeepSeek 思考模式）
     按 ``complete`` 路径约定忽略，不进入领域 Message。
+
+    ``final_answer`` 工具的 ``content`` 参数值会随块增量实时提取：``feed``
+    返回的 ``StreamChunk.final_answer_content`` 携带自上次以来新增的纯文本
+    前缀（从可能不完整的 arguments JSON 片段中扫描得到），供流式渲染层
+    逐字展示；该增量不进入 ``message()`` 的组装结果（消息仍由完整参数
+    反序列化得到）。
     """
 
     def __init__(self) -> None:
@@ -294,6 +393,8 @@ class StreamAccumulator:
 
         self._content_parts: list[str] = []
         self._tool_call_parts: dict[int, dict[str, str]] = {}
+        self._final_arguments = ""
+        self._final_content_emitted = 0
 
     def feed(self, chunk: Any) -> StreamChunk:
         """消费一个流式块，返回本块新增的内容增量。"""
@@ -325,7 +426,11 @@ class StreamAccumulator:
             for raw_call in raw_tool_calls:
                 self._feed_tool_call(raw_call)
 
-        return StreamChunk(content=content)
+        self._sync_final_arguments()
+        return StreamChunk(
+            content=content,
+            final_answer_content=self._final_answer_content_delta(),
+        )
 
     def _feed_tool_call(self, raw_call: Any) -> None:
         """把单个工具调用增量片段并入对应 index 的累积槽。"""
@@ -357,6 +462,25 @@ class StreamAccumulator:
                 entry["arguments"] += _text(
                     arguments, field_name="tool_call_delta.function.arguments"
                 )
+
+    def _sync_final_arguments(self) -> None:
+        """把名为 ``final_answer`` 的工具调用参数片段同步为跟踪目标。"""
+
+        for index in sorted(self._tool_call_parts):
+            entry = self._tool_call_parts[index]
+            if entry["name"] == "final_answer":
+                self._final_arguments = entry["arguments"]
+                return
+
+    def _final_answer_content_delta(self) -> str:
+        """返回 ``final_answer`` 工具 ``content`` 参数自上次以来的新增文本。"""
+
+        prefix = _extract_final_answer_content_prefix(self._final_arguments)
+        if len(prefix) <= self._final_content_emitted:
+            return ""
+        delta = prefix[self._final_content_emitted :]
+        self._final_content_emitted = len(prefix)
+        return delta
 
     def message(self) -> Message:
         """返回与一次性响应等价（按 index 排序）的 assistant Message。"""

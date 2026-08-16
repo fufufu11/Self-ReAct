@@ -192,6 +192,55 @@ def test_fake_llm_complete_stream_carries_tool_calls_in_final_chunk() -> None:
     )
 
 
+def test_fake_llm_complete_stream_streams_native_final_answer_content() -> None:
+    """原生 final_answer 工具调用的 content 参数按块经 final_answer_content 透出。"""
+
+    call = ToolCall(
+        call_id="call-1",
+        name="final_answer",
+        arguments={"content": "2 + 2 = 4。"},
+    )
+    llm = FakeLLM([Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call])])
+
+    chunks = list(
+        llm.complete_stream([Message(role=MessageRole.USER, content="计算 2 + 2")])
+    )
+
+    assert "".join(chunk.final_answer_content for chunk in chunks) == "2 + 2 = 4。"
+    assert all(chunk.content == "" for chunk in chunks)
+    assert chunks[-1] == StreamChunk(content="", tool_calls=(call,))
+    assert collect_stream(chunks) == Message(
+        role=MessageRole.ASSISTANT, content="", tool_calls=[call]
+    )
+
+
+def test_fake_llm_complete_stream_ignores_non_final_tool_content() -> None:
+    """非 final_answer 工具调用不产生 final_answer_content 增量。"""
+
+    call = ToolCall(
+        call_id="call-1",
+        name="calculator",
+        arguments={"expression": "2 + 2"},
+    )
+    llm = FakeLLM([Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call])])
+
+    chunks = list(
+        llm.complete_stream([Message(role=MessageRole.USER, content="计算 2 + 2")])
+    )
+
+    assert all(chunk.final_answer_content == "" for chunk in chunks)
+    assert collect_stream(chunks) == Message(
+        role=MessageRole.ASSISTANT, content="", tool_calls=[call]
+    )
+
+
+def test_stream_chunk_rejects_non_string_final_answer_content() -> None:
+    """StreamChunk.final_answer_content 必须是字符串。"""
+
+    with pytest.raises(TypeError):
+        StreamChunk(content="", final_answer_content=123)  # type: ignore[arg-type]
+
+
 def test_fake_llm_complete_stream_consumes_presets_and_exhausts() -> None:
     """完整流式调用同样按序消耗预置响应；耗尽时报稳定错误且计入历史。"""
 
