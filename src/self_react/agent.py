@@ -161,12 +161,16 @@ class Agent:
         stream: bool = False,
         on_chunk: Callable[[StreamChunk], None] | None = None,
         on_step: Callable[[TraceStep], None] | None = None,
+        extra_instructions: str = "",
     ) -> AgentState:
         """执行一次 ReAct 运行，并返回终态 ``AgentState``。
         默认走 ``LLM.complete`` 非流式路径，行为与 R-04 之前逐字节一致；
         ``stream=True`` 时每轮改用 ``complete_stream`` 消费增量，组装出的
         消息与非流式完全等价。``on_chunk`` 在每个增量块到达时触发；
         ``on_step`` 在每个 TraceStep 完成后触发，供 CLI 边产生边显示。
+        ``extra_instructions`` 是可选的场景/任务附加指引，非空时作为
+        系统提示词最后一个小节渲染（见 ``render_system_prompt``）；默认
+        空字符串，输出与既有版本完全一致。
         """
 
         if not isinstance(task, str):
@@ -175,6 +179,8 @@ class Agent:
             raise TypeError("on_chunk 必须是可调用对象")
         if on_step is not None and not callable(on_step):
             raise TypeError("on_step 必须是可调用对象")
+        if not isinstance(extra_instructions, str):
+            raise TypeError("extra_instructions 必须是字符串")
 
         def _notify_step(step: TraceStep) -> None:
             if on_step is not None:
@@ -187,7 +193,12 @@ class Agent:
             if (tool := self._registry.get(name)) is not None
         ]
         messages = [
-            Message(role=MessageRole.SYSTEM, content=render_system_prompt(tools)),
+            Message(
+                role=MessageRole.SYSTEM,
+                content=render_system_prompt(
+                    tools, extra_instructions=extra_instructions
+                ),
+            ),
             Message(role=MessageRole.USER, content=task),
         ]
 

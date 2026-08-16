@@ -104,13 +104,26 @@ def _render_tools_section(tools: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def render_system_prompt(tools: Sequence[PromptTool]) -> str:
+def render_system_prompt(
+    tools: Sequence[PromptTool],
+    *,
+    extra_instructions: str = "",
+) -> str:
     """渲染确定性的最小系统提示词。
 
     相同工具清单输入永远返回完全相同字符串：工具按名称排序保证清单顺序
     稳定，描述为空时使用稳定占位符，工具清单为空时说明无可用工具但保留
     完整格式契约。渲染不访问网络、不读取环境变量、不修改输入。
+
+    ``extra_instructions`` 是可选的场景/任务附加指引（keyword-only，默认
+    空字符串）：非空时作为最后一个小节原样追加（首尾空白会被剥掉），让
+    场景层能注入"数据文件固定、过滤参数语义、止损规则"等通用提示词里
+    没有的场景知识；默认空字符串时输出与既有版本逐字节一致，Day 16 三条
+    示例与全部既有测试不受影响。
     """
+
+    if not isinstance(extra_instructions, str):
+        raise TypeError("extra_instructions 必须是字符串")
 
     normalized = _normalize_tools(tools)
     sections = [
@@ -120,6 +133,9 @@ def render_system_prompt(tools: Sequence[PromptTool]) -> str:
         _render_tools_section(normalized),
         _OUTPUT_RULES,
     ]
+    extra = extra_instructions.strip()
+    if extra:
+        sections.append(extra)
     return "\n\n".join(sections).strip()
 
 

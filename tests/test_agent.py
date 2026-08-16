@@ -145,6 +145,50 @@ def test_system_message_uses_day10_prompt_and_state_tracks_tools() -> None:
     ]
 
 
+def test_run_injects_extra_instructions_into_system_message() -> None:
+    """``run`` 的 extra_instructions 出现在 system 消息，默认与基线一致。"""
+
+    registry = _default_registry()
+    extra = "【本次任务指引】\n只用 logs.ndjson。"
+
+    with_extra = Agent(
+        llm=FakeLLM([_final_answer_json("完成")]),
+        registry=registry,
+        max_steps=1,
+    ).run("回答我", extra_instructions=extra)
+    without_extra = Agent(
+        llm=FakeLLM([_final_answer_json("完成")]),
+        registry=registry,
+        max_steps=1,
+    ).run("回答我")
+
+    baseline_tools = [
+        CalculatorTool(),
+        FileReaderTool(root_directory="C:/allowed"),
+        FinalAnswerTool(),
+        RetrieveTool(),
+    ]
+    assert with_extra.messages[0].content == render_system_prompt(
+        baseline_tools, extra_instructions=extra
+    )
+    assert extra in with_extra.messages[0].content
+    assert without_extra.messages[0].content == render_system_prompt(baseline_tools)
+    assert extra not in without_extra.messages[0].content
+
+
+def test_run_rejects_non_string_extra_instructions() -> None:
+    """``extra_instructions`` 必须是字符串，非法类型明确拒绝。"""
+
+    agent = Agent(
+        llm=FakeLLM([_final_answer_json("完成")]),
+        registry=_default_registry(),
+        max_steps=1,
+    )
+
+    with pytest.raises(TypeError):
+        agent.run("回答我", extra_instructions=123)  # type: ignore[arg-type]
+
+
 def test_single_tool_call_writes_observation_then_final_answer() -> None:
     """单轮工具调用：ToolCall -> ToolResult -> Observation 写回 -> 下一轮。"""
 
