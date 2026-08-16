@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "self-react"
-version = "0.3.0"
+version = "1.0.0"
 description = "面向学习的最小 ReAct 智能体框架"
 readme = "README.md"
 requires-python = ">=3.11"
