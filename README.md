@@ -294,6 +294,30 @@ R-09 用 promjet.ru 2021-12 真实 Apache 访问日志（GitHub
 两条任务均在 5 步预算内耗尽并被框架明确终止（与 R-08 实测一致），真实调用
 结果非确定性，如实记录，不作为自动化测试前置条件。
 
+### 日志场景提示词引导与流式修复（Day 29-30 / R-10、R-11）
+
+**R-10（Day 29，场景提示词引导）**：R-09 后真实模型在 5 步预算内步数耗尽
+（猜文件名、把状态码当 `keyword` 过滤、证据足够仍深挖）。`render_system_prompt`
+新增可选 `extra_instructions` 注入缝，`log-troubleshooting` 场景提供五条中文
+指引（固定数据文件 / `error_code` 过滤 / `service` 是主机名 / 用 `log_query`
+不用 `file_reader` 直读 / 证据足够即 `final_answer`）。2026-08-16 真实验收
+（`--max-steps 8`）：
+
+| 任务 | 结果 |
+| --- | --- |
+| 排查 promjet 网站 2021-12-17 凌晨的 404 突增… | **7 / 8 步 FINAL_ANSWER**：判定外部扫描非应用故障，根因假设与 RB-404 动作完整正确（修复前 5/5 耗尽） |
+| 找出 2021-12-17 凌晨 404 集中出现的时间窗口 | 8 / 8 耗尽；该任务本质是确定性查询（离线示例两步即得精确答案），已**移出真实验收口径**，记录仅供复盘（见 day-29 §5） |
+
+**R-11（Day 30，--stream 逐字流式修复）**：真实模型用原生 `final_answer`
+工具调用交付最终回答，此前 `--stream` 只能运行结束后由渲染器兜底一次性打印。
+`StreamAccumulator` 现从跨块累积的 arguments JSON 中实时提取 `content` 前缀，
+经 `StreamChunk.final_answer_content` 增量透出，渲染器逐字打印。2026-08-16
+真实验收：开放排查任务最终回答 876 字符以 482 个增量块在约 3.3 秒内逐字到达
+（每块 1~8 字符），`finish()` 无重复输出（见 day-30 §5）。
+
+真实调用结果非确定性，如实记录，不作为自动化测试前置条件；离线确定性的
+`self-react example` 六条命令是可复现基准。
+
 ### 3分钟讲解
 
 3 分钟讲解稿见 [`docs/demo/3-minute-talk.md`](docs/demo/3-minute-talk.md)。
