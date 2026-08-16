@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from self_react.agent import Agent
 from self_react.llm import FakeLLM
 from self_react.models import AgentState, Message, MessageRole
-from self_react.scenarios.log_troubleshooting.scenario import build_registry
+from self_react.scenarios.log_troubleshooting.scenario import (
+    SCENARIO_EXTRA_INSTRUCTIONS,
+    build_registry,
+)
 
 
 def _tool_call_message(
@@ -162,7 +165,13 @@ def build_example_llm(name: str) -> FakeLLM:
 
 
 def run_scenario_example(name: str) -> AgentState:
-    """运行一个确定性场景示例并返回终态 ``AgentState``。"""
+    """运行一个确定性场景示例并返回终态 ``AgentState``。
+
+    与 CLI ``run --scenario log-troubleshooting`` 一致，把场景指引
+    （``SCENARIO_EXTRA_INSTRUCTIONS``）透传给 ``Agent.run``，让示例的
+    系统提示词与真实使用路径相同（Fake LLM 忽略提示词内容，示例的
+    决策、观察与最终回答仍完全确定）。
+    """
 
     scenario = SCENARIO_EXAMPLES[name]
     llm = build_example_llm(name)
@@ -171,7 +180,7 @@ def run_scenario_example(name: str) -> AgentState:
         registry=build_registry(),
         max_steps=len(scenario.responses),
     )
-    return agent.run(scenario.task)
+    return agent.run(scenario.task, extra_instructions=SCENARIO_EXTRA_INSTRUCTIONS)
 
 
 __all__ = [

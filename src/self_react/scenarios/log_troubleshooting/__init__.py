@@ -7,12 +7,14 @@ from self_react.scenarios.log_troubleshooting.examples import (
     run_scenario_example,
 )
 from self_react.scenarios.log_troubleshooting.scenario import (
+    SCENARIO_EXTRA_INSTRUCTIONS,
     SCENARIO_NAME,
     build_registry,
 )
 
 __all__ = [
     "SCENARIO_EXAMPLES",
+    "SCENARIO_EXTRA_INSTRUCTIONS",
     "SCENARIO_NAME",
     "ScenarioExample",
     "build_example_llm",

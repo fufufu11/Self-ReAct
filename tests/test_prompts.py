@@ -185,3 +185,45 @@ def test_real_tools_satisfy_prompt_tool_protocol() -> None:
     assert isinstance(CalculatorTool(), PromptTool)
     assert isinstance(FileReaderTool(root_directory="C:/allowed"), PromptTool)
     assert isinstance(RetrieveTool(), PromptTool)
+
+
+def test_render_default_extra_instructions_is_identical_to_baseline() -> None:
+    """默认 ``extra_instructions=""`` 的输出必须与不传参数完全一致。"""
+
+    tools = _three_tools()
+
+    assert render_system_prompt(tools) == render_system_prompt(
+        tools, extra_instructions=""
+    )
+
+
+def test_render_appends_extra_instructions_as_final_section() -> None:
+    """非空附加指引作为最后一个小节原样出现在提示词末尾。"""
+
+    tools = _three_tools()
+    extra = (
+        "【本次任务指引】\n1. 数据文件固定为 logs.ndjson。\n"
+        "2. 证据足以回答时立即输出 final_answer。"
+    )
+
+    prompt = render_system_prompt(tools, extra_instructions=extra)
+
+    assert prompt.endswith(extra)
+    assert prompt.index(extra) > prompt.index("输出规则")
+
+
+def test_render_treats_whitespace_only_extra_instructions_as_absent() -> None:
+    """全空白附加指引等价于不传，输出与默认一致。"""
+
+    tools = _three_tools()
+
+    assert render_system_prompt(tools, extra_instructions="   \n  ") == (
+        render_system_prompt(tools)
+    )
+
+
+def test_render_rejects_non_string_extra_instructions() -> None:
+    """附加指引必须是字符串；其它类型明确拒绝。"""
+
+    with pytest.raises(TypeError):
+        render_system_prompt(_three_tools(), extra_instructions=123)  # type: ignore[arg-type]

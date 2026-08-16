@@ -10,6 +10,7 @@ from self_react.llm import LLM
 from self_react.models import TerminationReason
 from self_react.scenarios.log_troubleshooting import (
     SCENARIO_EXAMPLES,
+    SCENARIO_EXTRA_INSTRUCTIONS,
     build_example_llm,
     build_registry,
     run_scenario_example,
@@ -28,6 +29,33 @@ def test_scenario_registry_contains_expected_tools() -> None:
         "runbook_search",
         "final_answer",
     )
+
+
+def test_scenario_extra_instructions_cover_three_failure_modes() -> None:
+    """场景指引必须覆盖 R-09 真实验收的三个失败模式（day-28 §5）。"""
+
+    assert isinstance(SCENARIO_EXTRA_INSTRUCTIONS, str)
+    # 失败模式一：猜测不存在的文件名 -> 固定三个数据文件；
+    assert "logs.ndjson" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "runbook.ndjson" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "deploys.ndjson" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "路径参数只能填这三个文件名" in SCENARIO_EXTRA_INSTRUCTIONS
+    # 失败模式二：把状态码当 keyword 过滤 -> 必须用 error_code；
+    assert "error_code" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "keyword" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "只匹配 message" in SCENARIO_EXTRA_INSTRUCTIONS
+    # 失败模式三：证据足够仍深挖 -> 立即输出 final_answer 止损。
+    assert "final_answer" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "证据足以回答时立即输出" in SCENARIO_EXTRA_INSTRUCTIONS
+
+
+def test_scenario_examples_render_scenario_guidance_in_system_message() -> None:
+    """三个场景示例的 system 消息都包含场景指引，且终局仍为最终回答。"""
+
+    for name in SCENARIO_EXAMPLES:
+        state = run_scenario_example(name)
+        assert SCENARIO_EXTRA_INSTRUCTIONS.strip() in state.messages[0].content
+        assert state.termination_reason is TerminationReason.FINAL_ANSWER
 
 
 def test_scenario_examples_run_to_final_answer() -> None:
@@ -172,3 +200,64 @@ def test_run_with_scenario_uses_scenario_registry(capsys: CaptureFixture[str]) -
     assert exit_code == 0
     assert captured.out == "最终回答：完成。\n"
     assert captured.err == ""
+
+
+def test_run_with_scenario_injects_guidance_into_system_message() -> None:
+    """``run --scenario log-troubleshooting`` 把场景指引注入 system 消息。"""
+
+    import json
+
+    from self_react.llm import FakeLLM
+    from self_react.models import Message, MessageRole
+
+    llm = FakeLLM(
+        [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content=json.dumps(
+                    {"kind": "final_answer", "content": "完成。"},
+                    ensure_ascii=False,
+                ),
+            )
+        ]
+    )
+
+    exit_code = main(
+        ["run", "任务", "--scenario", "log-troubleshooting"],
+        build_llm=lambda model, max_steps, task: llm,
+    )
+
+    assert exit_code == 0
+    assert llm.call_count == 1
+    system_message = llm.calls[0][0]
+    assert system_message.role is MessageRole.SYSTEM
+    assert SCENARIO_EXTRA_INSTRUCTIONS.strip() in system_message.content
+
+
+def test_run_without_scenario_does_not_inject_scenario_guidance(
+    capsys: CaptureFixture[str],
+) -> None:
+    """``run`` 不指定场景时不注入场景指引，保持默认提示词。"""
+
+    from self_react.llm import FakeLLM
+    from self_react.models import Message, MessageRole
+
+    llm = FakeLLM(
+        [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content='{"kind": "final_answer", "content": "完成。"}',
+            )
+        ]
+    )
+
+    exit_code = main(
+        ["run", "任务", "--model", "fake"],
+        build_llm=lambda model, max_steps, task: llm,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert llm.call_count == 1
+    assert SCENARIO_EXTRA_INSTRUCTIONS.strip() not in llm.calls[0][0].content
+    assert captured.out == "最终回答：完成。\n"

@@ -31,6 +31,7 @@ from self_react.models import TerminationReason
 from self_react.providers import available_providers, create_provider
 from self_react.scenarios.log_troubleshooting import (
     SCENARIO_EXAMPLES,
+    SCENARIO_EXTRA_INSTRUCTIONS,
     SCENARIO_NAME,
     run_scenario_example,
 )
@@ -389,6 +390,9 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
         if arguments.scenario is None
         else build_log_troubleshooting_registry()
     )
+    extra_instructions = (
+        SCENARIO_EXTRA_INSTRUCTIONS if arguments.scenario is not None else ""
+    )
     agent = Agent(
         llm=llm,
         registry=registry,
@@ -398,9 +402,14 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
     try:
         if arguments.stream:
             renderer = _FinalAnswerStreamRenderer()
-            state = agent.run(arguments.task, stream=True, on_chunk=renderer)
+            state = agent.run(
+                arguments.task,
+                stream=True,
+                on_chunk=renderer,
+                extra_instructions=extra_instructions,
+            )
         else:
-            state = agent.run(arguments.task)
+            state = agent.run(arguments.task, extra_instructions=extra_instructions)
     except LLMProviderError as exc:
         print(f"模型调用失败：{exc}", file=sys.stderr)
         return 3
