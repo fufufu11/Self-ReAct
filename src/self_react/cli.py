@@ -369,6 +369,24 @@ def _create_parser() -> argparse.ArgumentParser:
             "选择场景工具包；不指定时使用默认四个工具。当前可选：log-troubleshooting。"
         ),
     )
+    run_parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        help=(
+            "开启 plan-then-execute 模式：任务开始先让模型输出简短计划"
+            "（计入一步预算），再进入既有循环。"
+        ),
+    )
+    run_parser.add_argument(
+        "--reflect",
+        action="store_true",
+        default=False,
+        help=(
+            "开启 reflection 模式：可重试的工具调用失败后，强制一步"
+            "总结原因与下一步方案（计入一步预算）再继续。"
+        ),
+    )
     example_parser = subcommands.add_parser(
         "example",
         help="运行 Day 16 确定性端到端示例（无需网络与 API Key）。",
@@ -379,8 +397,9 @@ def _create_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "示例名称：single-tool（单工具）、multi-tool（多工具）、"
-            "failure-recovery（工具失败后恢复）、log-404-spike、"
-            "log-error-window、log-release-correlation。"
+            "failure-recovery（工具失败后恢复）、plan-demo（先规划后执行）、"
+            "reflection-demo（失败后反思）、log-404-spike、log-error-window、"
+            "log-release-correlation。"
         ),
     )
     return parser
@@ -417,9 +436,16 @@ def _run_command(arguments: argparse.Namespace, build_llm: BuildLLM) -> int:
                 stream=True,
                 on_chunk=renderer,
                 extra_instructions=extra_instructions,
+                plan_mode=arguments.plan,
+                reflection_mode=arguments.reflect,
             )
         else:
-            state = agent.run(arguments.task, extra_instructions=extra_instructions)
+            state = agent.run(
+                arguments.task,
+                extra_instructions=extra_instructions,
+                plan_mode=arguments.plan,
+                reflection_mode=arguments.reflect,
+            )
     except LLMProviderError as exc:
         print(f"模型调用失败：{exc}", file=sys.stderr)
         return 3

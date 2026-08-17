@@ -24,6 +24,9 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
   并回填规则式摘要（Claude auto-compact 风格），默认 20,000 字符。
 - 流式输出：`LLM.complete_stream` 增量协议 + Fake LLM 确定性流 + DeepSeek/OpenAI
   真流式；CLI `--stream` 实时逐字输出最终回答，默认关闭。
+- 可选规划/反思模式（R-06）：`run --plan` 任务开始先输出结构化计划再执行；
+  `run --reflect` 工具失败后强制一步"总结原因 + 下一步方案"再继续；默认关闭，
+  开启与否不影响既有行为。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -103,6 +106,8 @@ uv run self-react run "计算 2 + 2" --model deepseek --show-trace --stream
 | `--show-trace` / `--no-show-trace` | 是否打印人类可读执行轨迹 | 不打印 |
 | `--stream` | 实时逐字输出最终回答（从流式增量中提取，不打印逐步轨迹） | 不开启 |
 | `--scenario` | 场景工具包：`log-troubleshooting`（日志/故障排查）；不指定时使用默认四个工具 | 不指定 |
+| `--plan` | 开启 plan-then-execute：任务开始先让模型输出简短计划（计入一步预算），再进入既有循环 | 不开启 |
+| `--reflect` | 开启 reflection：可重试的工具调用失败后，强制一步总结原因与下一步方案（计入一步预算）再继续 | 不开启 |
 
 没有 API Key 时，可以用 Fake LLM 离线看一遍完整流水线（固定走
 计算器 -> 检索 -> 最终回答）：
@@ -117,15 +122,19 @@ uv run self-react run "演示任务" --model fake --show-trace
 uv run self-react example single-tool
 uv run self-react example multi-tool
 uv run self-react example failure-recovery
+uv run self-react example plan-demo
+uv run self-react example reflection-demo
 uv run self-react example log-404-spike
 uv run self-react example log-error-window
 uv run self-react example log-release-correlation
 ```
 
-三条示例固定展示单工具、多工具、工具失败后恢复三条主线，使用 Fake LLM 与
+前三条示例固定展示单工具、多工具、工具失败后恢复三条主线，使用 Fake LLM 与
 确定性工具，不访问网络、不依赖 API Key，相同命令永远得到相同的决策与观察
-（耗时除外）。后三条是日志/故障排查场景的确定性示例，使用 `log_query`、
-`runbook_search` 等工具。详细输出见下文[演示记录](#演示记录)。
+（耗时除外）。`plan-demo` / `reflection-demo` 演示 R-06 的可选规划/反思模式
+（轨迹中含"决策：计划 / 决策：反思"步骤）。后三条是日志/故障排查场景的
+确定性示例，使用 `log_query`、`runbook_search` 等工具。详细输出见下文
+[演示记录](#演示记录)。
 
 用真实模型跑日志/故障排查场景时加上 `--scenario`：
 
@@ -317,6 +326,25 @@ R-09 用 promjet.ru 2021-12 真实 Apache 访问日志（GitHub
 
 真实调用结果非确定性，如实记录，不作为自动化测试前置条件；离线确定性的
 `self-react example` 六条命令是可复现基准。
+
+### 规划/反思模式（Day 31 / R-06）
+
+`run --plan` / `run --reflect` 是 R-06 的可选模式（默认关闭）。离线确定性
+示例 `plan-demo` / `reflection-demo` 的轨迹中可见"决策：计划 / 决策：反思"
+步骤，计划与反思各计入一步预算。
+
+2026-08-17 用真实 DeepSeek（`deepseek-v4-flash`）验收：
+
+| 任务 | 模式 | 结果 |
+| --- | --- | --- |
+| 计算 2 + 2，并检索 react 主题 | `--plan` | 4/5 FINAL_ANSWER：首步输出结构化计划，后续严格按计划执行收尾 |
+| 先检索 qwerty123（预期失败），失败后反思并改用 react | `--reflect` | 5/5 FINAL_ANSWER：失败后强制反思（原因 + 下一步），随后改用 react 成功 |
+| 排查 promjet 网站 2021-12-17 凌晨的 404 突增… | `--plan --reflect`（max-steps 8） | **6/8 FINAL_ANSWER**：计划完整遵循场景五条指引，结论"外部备份/源码文件扫描而非应用故障"+ 根因假设与下一步动作完整正确（R-10 基线 7/8 步） |
+
+对比显示：规划模式使模型首步即产出符合场景指引的调查路线，可解释性
+（计划/反思写入轨迹）与收敛性（场景任务少用一步完成）均有提升。真实调用
+结果非确定性，不作为自动化测试前置条件；离线确定性的八个 `example` 命令
+是可复现基准。
 
 ### 3分钟讲解
 

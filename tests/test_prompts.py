@@ -227,3 +227,70 @@ def test_render_rejects_non_string_extra_instructions() -> None:
 
     with pytest.raises(TypeError):
         render_system_prompt(_three_tools(), extra_instructions=123)  # type: ignore[arg-type]
+
+
+def test_render_default_modes_are_identical_to_baseline() -> None:
+    """plan_mode / reflection_mode 默认关闭时输出与不传参数逐字节一致。"""
+
+    tools = _three_tools()
+
+    assert render_system_prompt(tools) == render_system_prompt(
+        tools, plan_mode=False, reflection_mode=False
+    )
+
+
+def test_render_plan_mode_appends_plan_phase_section() -> None:
+    """plan_mode 开启时提示词包含规划阶段契约小节。"""
+
+    tools = _three_tools()
+    prompt = render_system_prompt(tools, plan_mode=True)
+
+    assert "规划阶段" in prompt
+    assert '"kind": "plan"' in prompt
+    assert "先输出计划" in prompt
+    # 默认契约不变，规划小节在输出规则之后
+    assert prompt.index("规划阶段") > prompt.index("输出规则")
+    assert "final_answer" in prompt
+    assert "tool_call" in prompt
+
+
+def test_render_reflection_mode_appends_reflection_phase_section() -> None:
+    """reflection_mode 开启时提示词包含反思阶段契约小节。"""
+
+    tools = _three_tools()
+    prompt = render_system_prompt(tools, reflection_mode=True)
+
+    assert "反思阶段" in prompt
+    assert '"kind": "reflection"' in prompt
+    assert "失败原因" in prompt
+    assert prompt.index("反思阶段") > prompt.index("输出规则")
+    assert "final_answer" in prompt
+    assert "tool_call" in prompt
+
+
+def test_render_both_modes_keep_extra_instructions_last() -> None:
+    """两种模式同时开启时，模式小节在输出规则之后、extra_instructions 之前。"""
+
+    tools = _three_tools()
+    extra = "【场景指引】只用 logs.ndjson。"
+
+    prompt = render_system_prompt(
+        tools,
+        extra_instructions=extra,
+        plan_mode=True,
+        reflection_mode=True,
+    )
+
+    assert prompt.endswith(extra)
+    assert prompt.index("规划阶段") > prompt.index("输出规则")
+    assert prompt.index("反思阶段") > prompt.index("规划阶段")
+    assert prompt.index(extra) > prompt.index("反思阶段")
+
+
+def test_render_rejects_non_bool_mode_flags() -> None:
+    """plan_mode / reflection_mode 必须是布尔值。"""
+
+    with pytest.raises(TypeError):
+        render_system_prompt(_three_tools(), plan_mode=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        render_system_prompt(_three_tools(), reflection_mode="yes")  # type: ignore[arg-type]

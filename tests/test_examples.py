@@ -14,19 +14,37 @@ from pytest import CaptureFixture
 from self_react.cli import main
 from self_react.examples import EXAMPLES, build_example_llm, run_example
 from self_react.llm import LLM
-from self_react.models import MessageRole, TerminationReason, ToolErrorCode
+from self_react.models import (
+    MessageRole,
+    Plan,
+    Reflection,
+    TerminationReason,
+    ToolErrorCode,
+)
 from self_react.tools.retrieve import KNOWLEDGE_BASE
 
 
-def test_examples_defines_three_fixed_scenarios() -> None:
-    """示例表恰好包含三条主线，且每个示例都有稳定名称、标题与任务。"""
+def test_examples_defines_five_fixed_scenarios() -> None:
+    """示例表恰好包含五条主线，且每个示例都有稳定名称、标题与任务。"""
 
-    assert sorted(EXAMPLES) == ["failure-recovery", "multi-tool", "single-tool"]
+    assert sorted(EXAMPLES) == [
+        "failure-recovery",
+        "multi-tool",
+        "plan-demo",
+        "reflection-demo",
+        "single-tool",
+    ]
     assert EXAMPLES["single-tool"].title == "单工具"
     assert EXAMPLES["multi-tool"].title == "多工具"
     assert EXAMPLES["failure-recovery"].title == "工具失败后恢复"
+    assert EXAMPLES["plan-demo"].title == "先规划后执行"
+    assert EXAMPLES["reflection-demo"].title == "失败后反思"
     assert EXAMPLES["single-tool"].task == "计算 2 + 2"
     assert EXAMPLES["multi-tool"].task == "计算 2 + 2，并检索 react 主题"
+    assert EXAMPLES["plan-demo"].plan_mode is True
+    assert EXAMPLES["reflection-demo"].reflection_mode is True
+    assert EXAMPLES["single-tool"].plan_mode is False
+    assert EXAMPLES["single-tool"].reflection_mode is False
 
 
 def test_build_example_llm_returns_llm_protocol_adapter() -> None:
@@ -141,6 +159,16 @@ def test_examples_are_deterministic() -> None:
             "工具失败后恢复",
             "第一次检索失败后改用 react，成功找到 ReAct 的说明。",
         ),
+        (
+            "plan-demo",
+            "先规划后执行",
+            "计算结果是 4；ReAct 是一种让模型推理与行动交错的智能体范式。",
+        ),
+        (
+            "reflection-demo",
+            "失败后反思",
+            "第一次检索失败后反思原因，改用 react 成功找到 ReAct 的说明。",
+        ),
     ],
 )
 def test_example_command_prints_answer_and_trace(
@@ -165,6 +193,32 @@ def test_example_command_prints_answer_and_trace(
     assert "第 1 步" in text
     assert "决策：调用工具" in text
     assert captured.err == ""
+
+
+def test_plan_demo_trace_contains_plan_step() -> None:
+    """plan-demo 的轨迹第一步是计划，且计划计入步数预算。"""
+
+    state = run_example("plan-demo")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 4
+    assert isinstance(state.trace[0].decision, Plan)
+    assert state.trace[0].decision.kind == "plan"
+    assert "计算器" in state.trace[0].decision.content
+
+
+def test_reflection_demo_trace_contains_reflection_step() -> None:
+    """reflection-demo 的轨迹在失败后包含反思步骤。"""
+
+    state = run_example("reflection-demo")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 4
+    assert state.trace[0].decision is not None
+    assert state.trace[0].decision.kind == "tool_call"
+    assert isinstance(state.trace[1].decision, Reflection)
+    assert state.trace[1].decision.kind == "reflection"
+    assert "react" in state.trace[1].decision.content
 
 
 def test_example_command_rejects_unknown_name(capsys: CaptureFixture[str]) -> None:

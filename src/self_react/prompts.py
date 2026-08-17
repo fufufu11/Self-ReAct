@@ -59,6 +59,27 @@ _OUTPUT_RULES = """## 输出规则
 5. 当前没有可用工具时，只能输出 final_answer。"""
 """无论工具清单如何变化都保持稳定的输出纪律。"""
 
+_PLAN_PHASE_SECTION = """## 规划阶段（仅当被要求"先输出计划"时使用）
+
+任务开始且要求先规划时，只输出一个 JSON 对象：
+
+{"kind": "plan", "content": "简短计划文本"}
+
+content 必须是非空字符串，用 1-3 句话说明你将如何完成任务：要调用哪些
+工具、按什么顺序、证据足够时何时给出最终回答。不要输出 final_answer 或
+tool_call。"""
+"""plan-then-execute 模式（R-06）的规划阶段格式契约。"""
+
+_REFLECTION_PHASE_SECTION = """## 反思阶段（仅当工具调用失败并被要求反思时使用）
+
+工具调用失败并要求反思时，只输出一个 JSON 对象：
+
+{"kind": "reflection", "content": "失败原因总结与下一步方案"}
+
+content 必须是非空字符串：先一句话总结失败原因，再说明下一步方案。
+不要输出 final_answer 或 tool_call。"""
+"""reflection 模式（R-06）的反思阶段格式契约。"""
+
 
 @runtime_checkable
 class PromptTool(Protocol):
@@ -108,6 +129,8 @@ def render_system_prompt(
     tools: Sequence[PromptTool],
     *,
     extra_instructions: str = "",
+    plan_mode: bool = False,
+    reflection_mode: bool = False,
 ) -> str:
     """渲染确定性的最小系统提示词。
 
@@ -120,10 +143,19 @@ def render_system_prompt(
     场景层能注入"数据文件固定、过滤参数语义、止损规则"等通用提示词里
     没有的场景知识；默认空字符串时输出与既有版本逐字节一致，Day 16 三条
     示例与全部既有测试不受影响。
+
+    ``plan_mode`` / ``reflection_mode`` 是 R-06 的可选模式开关（均默认
+    ``False``）：开启时在"输出规则"之后追加对应的规划/反思阶段格式契约
+    小节（仍排在 ``extra_instructions`` 之前），让模型在特化阶段输出
+    结构化计划/反思；两个开关都关闭时输出与既有版本逐字节一致。
     """
 
     if not isinstance(extra_instructions, str):
         raise TypeError("extra_instructions 必须是字符串")
+    if not isinstance(plan_mode, bool):
+        raise TypeError("plan_mode 必须是布尔值")
+    if not isinstance(reflection_mode, bool):
+        raise TypeError("reflection_mode 必须是布尔值")
 
     normalized = _normalize_tools(tools)
     sections = [
@@ -133,6 +165,10 @@ def render_system_prompt(
         _render_tools_section(normalized),
         _OUTPUT_RULES,
     ]
+    if plan_mode:
+        sections.append(_PLAN_PHASE_SECTION)
+    if reflection_mode:
+        sections.append(_REFLECTION_PHASE_SECTION)
     extra = extra_instructions.strip()
     if extra:
         sections.append(extra)

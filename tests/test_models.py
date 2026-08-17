@@ -11,6 +11,8 @@ from self_react.models import (
     Message,
     MessageRole,
     Observation,
+    Plan,
+    Reflection,
     TerminationReason,
     ToolCall,
     ToolError,
@@ -308,3 +310,81 @@ def test_trace_error_can_record_parse_failure_without_fake_decision() -> None:
 
     assert step.decision is None
     assert step.error is not None
+
+
+def test_plan_model_requires_non_blank_content_and_forbids_extra_fields() -> None:
+    """Plan 与 FinalAnswer 同构：只接受非空 content，多余字段被拒绝。"""
+
+    plan = Plan(content="先调用计算器，再给出最终回答")
+
+    assert plan.kind == "plan"
+    assert plan.content == "先调用计算器，再给出最终回答"
+
+    with pytest.raises(ValidationError):
+        Plan(content="")
+    with pytest.raises(ValidationError):
+        Plan(content="   ")
+    with pytest.raises(ValidationError):
+        Plan(content=123)
+    with pytest.raises(ValidationError):
+        Plan(content="计划", extra=True)
+
+
+def test_reflection_model_requires_non_blank_content_and_forbids_extra_fields() -> None:
+    """Reflection 与 FinalAnswer 同构：只接受非空 content，多余字段被拒绝。"""
+
+    reflection = Reflection(content="检索失败，原因是主题不存在；下一步改用 react")
+
+    assert reflection.kind == "reflection"
+    assert reflection.content == "检索失败，原因是主题不存在；下一步改用 react"
+
+    with pytest.raises(ValidationError):
+        Reflection(content="")
+    with pytest.raises(ValidationError):
+        Reflection(content="   ")
+    with pytest.raises(ValidationError):
+        Reflection(content=123)
+    with pytest.raises(ValidationError):
+        Reflection(content="反思", extra=True)
+
+
+def test_plan_and_reflection_enter_trace_step_as_decision() -> None:
+    """Plan / Reflection 可以作为 TraceStep.decision 记录（R-06 轨迹步骤）。"""
+
+    plan_step = TraceStep(step_number=1, decision=Plan(content="先计算再回答"))
+    reflection_step = TraceStep(
+        step_number=2,
+        decision=Reflection(content="失败原因：主题未知；下一步换主题"),
+    )
+
+    assert plan_step.decision == Plan(content="先计算再回答")
+    assert reflection_step.decision == Reflection(
+        content="失败原因：主题未知；下一步换主题"
+    )
+    assert plan_step.observation is None
+    assert reflection_step.observation is None
+
+
+def test_plan_and_reflection_round_trip_through_agent_state_json() -> None:
+    """含 Plan / Reflection 步骤的状态可以 JSON 序列化往返（领域模型可序列化）。"""
+
+    state = AgentState(
+        task="排查任务",
+        max_steps=3,
+        steps_used=2,
+        trace=[
+            TraceStep(step_number=1, decision=Plan(content="先读日志再判断")),
+            TraceStep(
+                step_number=2,
+                decision=Reflection(content="日志过滤用错字段；改用 error_code"),
+            ),
+        ],
+    )
+
+    decoded = AgentState.model_validate_json(state.model_dump_json())
+
+    assert decoded == state
+    assert decoded.trace[0].decision == Plan(content="先读日志再判断")
+    assert decoded.trace[1].decision == Reflection(
+        content="日志过滤用错字段；改用 error_code"
+    )
