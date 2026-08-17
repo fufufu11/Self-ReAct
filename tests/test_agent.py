@@ -27,6 +27,8 @@ from self_react.models import (
     FinalAnswer,
     Message,
     MessageRole,
+    Plan,
+    Reflection,
     TerminationReason,
     ToolCall,
     ToolErrorCode,
@@ -79,6 +81,22 @@ def _tool_call_json(
             },
             ensure_ascii=False,
         )
+    )
+
+
+def _plan_json(content: str) -> Message:
+    """构造一条符合 R-06 规划契约的计划原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "plan", "content": content}, ensure_ascii=False)
+    )
+
+
+def _reflection_json(content: str) -> Message:
+    """构造一条符合 R-06 反思契约的反思原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "reflection", "content": content}, ensure_ascii=False)
     )
 
 
@@ -1256,3 +1274,280 @@ def test_stream_mode_native_final_answer_terminates_with_final_answer() -> None:
     assert state.steps_used == 1
     assert len(state.trace) == 1
     assert state.trace[0].decision == FinalAnswer(content="完成。")
+
+
+def test_plan_mode_plans_then_executes() -> None:
+    """plan-then-execute：先输出计划（计一步），再进入既有循环直到最终回答。"""
+
+    llm = FakeLLM(
+        [
+            _plan_json("先调用计算器，再给出最终回答"),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run(
+        "计算 2 + 2", plan_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.final_answer == FinalAnswer(content="结果是 4。")
+    assert state.steps_used == 3
+    assert len(state.trace) == 3
+    assert state.steps_used == len(state.trace)
+    assert llm.call_count == 3
+
+    plan_step = state.trace[0]
+    assert plan_step.decision == Plan(content="先调用计算器，再给出最终回答")
+    assert plan_step.observation is None
+
+    tool_step = state.trace[1]
+    assert isinstance(tool_step.decision, ToolCall)
+    assert tool_step.decision.name == "calculator"
+
+    final_step = state.trace[2]
+    assert final_step.decision == FinalAnswer(content="结果是 4。")
+
+    # 计划指令作为 user 消息进入上下文
+    assert any(
+        message.role is MessageRole.USER and "先输出计划" in message.content
+        for message in state.messages
+    )
+
+
+def test_plan_mode_injects_plan_contract_into_system_prompt() -> None:
+    """plan_mode 开启时系统提示词包含规划阶段契约，默认不包含。"""
+
+    registry = _default_registry()
+    with_plan = Agent(
+        llm=FakeLLM([_plan_json("计划"), _final_answer_json("完成")]),
+        registry=registry,
+        max_steps=3,
+    ).run("任务", plan_mode=True)
+    without = Agent(
+        llm=FakeLLM([_final_answer_json("完成")]),
+        registry=registry,
+        max_steps=1,
+    ).run("任务")
+
+    assert "规划阶段" in with_plan.messages[0].content
+    assert '"kind": "plan"' in with_plan.messages[0].content
+    assert "规划阶段" not in without.messages[0].content
+
+
+def test_plan_mode_parse_failure_retries_then_recovers() -> None:
+    """规划阶段解析失败有界重试一次：回写稳定错误、消耗一步，重试成功继续。"""
+
+    llm = FakeLLM(
+        [
+            _json_message("这不是计划 JSON"),
+            _plan_json("先计算，再回答"),
+            _tool_call_json("call-1", "calculator", {"expression": "1 + 1"}),
+            _final_answer_json("结果是 2。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run(
+        "计算 1 + 1", plan_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 4
+    assert llm.call_count == 4
+
+    error_step = state.trace[0]
+    assert error_step.decision is None
+    assert error_step.error is not None
+    assert error_step.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert error_step.error.retryable is True
+
+    plan_step = state.trace[1]
+    assert plan_step.decision == Plan(content="先计算，再回答")
+
+
+def test_plan_mode_parse_failure_twice_terminates() -> None:
+    """规划阶段连续两次解析失败：有界重试后仍失败，以解析错误终止。"""
+
+    llm = FakeLLM([_json_message("坏输出 1"), _json_message("坏输出 2")])
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run("任务", plan_mode=True)
+
+    assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
+    assert state.final_answer is None
+    assert state.steps_used == 2
+    assert llm.call_count == 2
+    assert state.trace[1].error is not None
+    assert state.trace[1].error.retryable is False
+
+
+def test_plan_mode_zero_budget_terminates_without_model_call() -> None:
+    """规划阶段也受 max_steps 硬预算：0 步预算不发起任何模型调用。"""
+
+    llm = FakeLLM([])
+    registry = _default_registry()
+
+    state = Agent(llm=llm, registry=registry, max_steps=0).run("任务", plan_mode=True)
+
+    assert state.termination_reason is TerminationReason.MAX_STEPS_EXCEEDED
+    assert state.steps_used == 0
+    assert state.trace == []
+    assert llm.call_count == 0
+
+
+def test_plan_mode_counts_against_step_budget() -> None:
+    """规划阶段计入步数预算：计划 + 一次工具调用恰好耗尽 2 步预算。"""
+
+    llm = FakeLLM(
+        [
+            _plan_json("先调用计算器"),
+            _tool_call_json("call-1", "calculator", {"expression": "1 + 1"}),
+            _final_answer_json("结果是 2。"),  # 预算耗尽，永远不会被消费
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=2).run(
+        "计算 1 + 1", plan_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.MAX_STEPS_EXCEEDED
+    assert state.steps_used == 2
+    assert llm.call_count == 2
+    assert isinstance(state.trace[0].decision, Plan)
+    assert isinstance(state.trace[1].decision, ToolCall)
+
+
+def test_reflection_mode_reflects_after_retryable_failure() -> None:
+    """反思模式：可重试工具失败后强制一步反思，再继续直到最终回答。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "retrieve", {"query": "unknown-topic"}),
+            _reflection_json("检索失败，原因是主题不存在；下一步改用 react"),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _final_answer_json("已找到 ReAct 的说明。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run(
+        "查一个主题", reflection_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert state.steps_used == 4
+    assert len(state.trace) == 4
+    assert state.steps_used == len(state.trace)
+    assert llm.call_count == 4
+
+    tool_step = state.trace[0]
+    assert isinstance(tool_step.decision, ToolCall)
+    assert tool_step.observation is not None
+    assert tool_step.observation.is_error is True
+
+    reflection_step = state.trace[1]
+    assert reflection_step.decision == Reflection(
+        content="检索失败，原因是主题不存在；下一步改用 react"
+    )
+    assert reflection_step.observation is None
+
+    recovery_step = state.trace[2]
+    assert isinstance(recovery_step.decision, ToolCall)
+    assert recovery_step.decision.name == "retrieve"
+    assert recovery_step.observation is not None
+    assert recovery_step.observation.is_error is False
+
+
+def test_reflection_mode_skips_reflection_for_fatal_failure() -> None:
+    """反思模式不干预不可恢复失败：直接终止，不发起反思调用。"""
+
+    registry = ToolRegistry()
+    registry.register(FailingTool())
+    llm = FakeLLM([_tool_call_json("call-1", "failing", {})])
+
+    state = Agent(llm=llm, registry=registry, max_steps=3).run(
+        "任务", reflection_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.TOOL_EXECUTION_ERROR
+    assert state.steps_used == 1
+    assert llm.call_count == 1
+    assert all(
+        step.decision is None or not isinstance(step.decision, Reflection)
+        for step in state.trace
+    )
+
+
+def test_reflection_mode_parse_failure_retries_then_terminates() -> None:
+    """反思阶段解析失败有界重试一次，仍失败以解析错误终止。"""
+
+    llm = FakeLLM(
+        [
+            _tool_call_json("call-1", "retrieve", {"query": "unknown-topic"}),
+            _json_message("坏反思 1"),
+            _json_message("坏反思 2"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run(
+        "查一个主题", reflection_mode=True
+    )
+
+    assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
+    assert state.steps_used == 3
+    assert llm.call_count == 3
+    assert state.trace[0].decision is not None  # 失败的检索步骤
+    assert state.trace[1].error is not None
+    assert state.trace[1].error.retryable is True
+    assert state.trace[2].error is not None
+    assert state.trace[2].error.retryable is False
+
+
+def test_aux_phases_notify_on_step_callback() -> None:
+    """规划与反思步骤都通过 on_step 回调暴露给展示层。"""
+
+    llm = FakeLLM(
+        [
+            _plan_json("先检索再回答"),
+            _tool_call_json("call-1", "retrieve", {"query": "unknown-topic"}),
+            _reflection_json("失败原因：主题不存在；下一步结束"),
+            _final_answer_json("完成。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+    steps: list[TraceStep] = []
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run(
+        "任务", plan_mode=True, reflection_mode=True, on_step=steps.append
+    )
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    assert [step.step_number for step in steps] == [1, 2, 3, 4]
+    assert isinstance(steps[0].decision, Plan)
+    assert isinstance(steps[2].decision, Reflection)
+
+
+def test_run_rejects_non_bool_mode_flags() -> None:
+    """plan_mode / reflection_mode 必须是布尔值。"""
+
+    agent = Agent(
+        llm=FakeLLM([_final_answer_json("完成")]),
+        registry=_default_registry(),
+        max_steps=1,
+    )
+
+    with pytest.raises(TypeError):
+        agent.run("任务", plan_mode=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        agent.run("任务", reflection_mode="yes")  # type: ignore[arg-type]

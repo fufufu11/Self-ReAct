@@ -125,6 +125,40 @@ class FinalAnswer(BaseModel):
     _validate_content = field_validator("content")(_ensure_non_blank)
 
 
+class Plan(BaseModel):
+    """规划阶段模型输出的简短执行计划（R-06，可选模式）。
+
+    任务开始且开启 ``plan-then-execute`` 时，模型先输出一个结构化计划，
+    再进入既有 ReAct 循环。``Plan`` 与 ``FinalAnswer`` 同构：只携带
+    非空文本，不关联工具或运行时资源；计划内容记录在轨迹中供解释性展示，
+    不参与工具分派。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["plan"] = "plan"
+    content: Annotated[str, Field(strict=True, min_length=1)]
+
+    _validate_content = field_validator("content")(_ensure_non_blank)
+
+
+class Reflection(BaseModel):
+    """反思阶段模型输出的失败原因总结与下一步方案（R-06，可选模式）。
+
+    工具调用失败且开启 ``reflection`` 模式时，强制模型先输出一步结构化
+    反思（"总结原因 + 下一步方案"）再继续循环。``Reflection`` 与
+    ``FinalAnswer`` 同构：只携带非空文本，不关联工具或运行时资源；反思
+    内容记录在轨迹中供解释性展示，不参与工具分派。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["reflection"] = "reflection"
+    content: Annotated[str, Field(strict=True, min_length=1)]
+
+    _validate_content = field_validator("content")(_ensure_non_blank)
+
+
 class ToolError(BaseModel):
     """工具失败的结构化信息。
 
@@ -362,8 +396,12 @@ class TraceError(BaseModel):
     _validate_details = field_validator("details")(_ensure_json_object)
 
 
-Decision = Annotated[ToolCall | FinalAnswer, Field(discriminator="kind")]
-"""一个轨迹步骤的判别决策：请求工具或直接给出最终回答。"""
+Decision = Annotated[
+    ToolCall | FinalAnswer | Plan | Reflection,
+    Field(discriminator="kind"),
+]
+"""一个轨迹步骤的判别决策：请求工具、直接给出最终回答，或（R-06 可选模式）
+记录规划/反思文本。"""
 
 
 class TraceStep(BaseModel):
@@ -468,6 +506,8 @@ __all__ = [
     "Message",
     "MessageRole",
     "Observation",
+    "Plan",
+    "Reflection",
     "TerminationReason",
     "ToolCall",
     "ToolError",

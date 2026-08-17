@@ -33,6 +33,8 @@ from self_react.models import (
     Message,
     MessageRole,
     Observation,
+    Plan,
+    Reflection,
     TerminationReason,
     ToolCall,
     ToolErrorCode,
@@ -48,6 +50,20 @@ from self_react.tools.final_answer import FinalAnswerTool
 _SUMMARY_LIMIT = 2_000
 """输入摘要的最大字符数，与 ``TraceStep.input_summary`` 的领域上限一致。"""
 
+_PLAN_INSTRUCTION = (
+    '请先输出计划：只输出一个 JSON 对象 {"kind": "plan", "content": '
+    '"简短计划"}，用 1-3 句话说明你将如何完成任务（要调用哪些工具、按什么'
+    "顺序、证据足够时何时给出最终回答）。不要输出其他内容。"
+)
+"""plan-then-execute 模式（R-06）规划阶段的稳定指令消息。"""
+
+_REFLECTION_INSTRUCTION = (
+    "刚才的工具调用失败了。请先反思：只输出一个 JSON 对象 "
+    '{"kind": "reflection", "content": "失败原因总结与下一步方案"}，'
+    "先一句话总结失败原因，再说明下一步方案。不要输出其他内容。"
+)
+"""reflection 模式（R-06）反思阶段的稳定指令消息。"""
+
 
 def _summarize_input(state: AgentState) -> str:
     """生成一轮模型输入的摘要。
@@ -61,6 +77,13 @@ def _summarize_input(state: AgentState) -> str:
         if message.role is MessageRole.TOOL:
             return message.content[:_SUMMARY_LIMIT]
     return state.task[:_SUMMARY_LIMIT]
+
+
+def _notify_step(step: TraceStep, on_step: Callable[[TraceStep], None] | None) -> None:
+    """把完成的轨迹步骤交给可选的展示回调。"""
+
+    if on_step is not None:
+        on_step(step)
 
 
 def _repeated_action_reason(decision: ToolCall, state: AgentState) -> str | None:
@@ -118,6 +141,24 @@ def _parse_error_feedback(exc: ParseError) -> Message:
     )
 
 
+def _aux_parse_feedback(exc: ParseError, kind_label: str) -> Message:
+    """构造规划/反思阶段解析失败时回写给模型的稳定错误反馈消息。
+
+    与 :func:`_parse_error_feedback` 同一风格，只复用 ``ParseError`` 的
+    稳定中文说明；``kind_label`` 是当前阶段唯一允许的 kind 名称（``plan``
+    或 ``reflection``），引导模型重新输出对应形态的 JSON 对象。
+    """
+
+    return Message(
+        role=MessageRole.USER,
+        content=(
+            f"你的上一条输出无法解析：{exc}。请重新输出，只输出一个 "
+            f"JSON 对象，kind 只能是 {kind_label}，"
+            "不要包含 JSON 以外的文字、解释或代码块标记。"
+        ),
+    )
+
+
 class Agent:
     """拥有唯一步数计数与终止判断的 ReAct 循环控制器。
 
@@ -162,6 +203,8 @@ class Agent:
         on_chunk: Callable[[StreamChunk], None] | None = None,
         on_step: Callable[[TraceStep], None] | None = None,
         extra_instructions: str = "",
+        plan_mode: bool = False,
+        reflection_mode: bool = False,
     ) -> AgentState:
         """执行一次 ReAct 运行，并返回终态 ``AgentState``。
         默认走 ``LLM.complete`` 非流式路径，行为与 R-04 之前逐字节一致；
@@ -171,6 +214,14 @@ class Agent:
         ``extra_instructions`` 是可选的场景/任务附加指引，非空时作为
         系统提示词最后一个小节渲染（见 ``render_system_prompt``）；默认
         空字符串，输出与既有版本完全一致。
+
+        ``plan_mode`` / ``reflection_mode`` 是 R-06 的可选模式（默认关闭，
+        关闭时行为与既有版本逐字节一致）：开启 ``plan_mode`` 时任务开始
+        先进入规划阶段（一次不传工具定义的模型调用，解析为 ``Plan`` 并
+        计入一步预算），再进入既有循环；开启 ``reflection_mode`` 时，可
+        重试的工具调用失败后会强制进入一次反思阶段（解析为
+        ``Reflection`` 并计入一步预算）再继续。两种特化阶段都受
+        ``max_steps`` 硬预算约束，解析失败有界重试一次。
         """
 
         if not isinstance(task, str):
@@ -181,10 +232,10 @@ class Agent:
             raise TypeError("on_step 必须是可调用对象")
         if not isinstance(extra_instructions, str):
             raise TypeError("extra_instructions 必须是字符串")
-
-        def _notify_step(step: TraceStep) -> None:
-            if on_step is not None:
-                on_step(step)
+        if not isinstance(plan_mode, bool):
+            raise TypeError("plan_mode 必须是布尔值")
+        if not isinstance(reflection_mode, bool):
+            raise TypeError("reflection_mode 必须是布尔值")
 
         tool_names = tuple(self._registry.names)
         tools = [
@@ -196,7 +247,10 @@ class Agent:
             Message(
                 role=MessageRole.SYSTEM,
                 content=render_system_prompt(
-                    tools, extra_instructions=extra_instructions
+                    tools,
+                    extra_instructions=extra_instructions,
+                    plan_mode=plan_mode,
+                    reflection_mode=reflection_mode,
                 ),
             ),
             Message(role=MessageRole.USER, content=task),
@@ -209,6 +263,21 @@ class Agent:
             steps_used=0,
             trace=[],
         )
+
+        if plan_mode:
+            # 规划阶段：任务开始先让模型输出结构化计划，再进入既有循环。
+            # 不传工具定义，模型只能输出文本 JSON 计划；解析失败有界重试
+            # 一次，仍失败以 MODEL_OUTPUT_PARSE_ERROR 终止。
+            messages, state = self._aux_phase(
+                task=task,
+                tool_names=tool_names,
+                messages=messages,
+                state=state,
+                on_step=on_step,
+                instruction=_PLAN_INSTRUCTION,
+                allowed_kinds=frozenset({"plan"}),
+                kind_label="plan",
+            )
 
         parse_retried = False
         while not state.is_terminated:
@@ -270,7 +339,7 @@ class Agent:
                         observation=observation,
                         duration_ms=duration_ms,
                     )
-                    _notify_step(step)
+                    _notify_step(step, on_step)
                     state = self._rebuild_state(
                         task=task,
                         tool_names=tool_names,
@@ -300,7 +369,7 @@ class Agent:
                         ),
                         duration_ms=duration_ms,
                     )
-                    _notify_step(step)
+                    _notify_step(step, on_step)
                     trace = [*state.trace, step]
                     if not retryable:
                         state = self._rebuild_state(
@@ -339,7 +408,7 @@ class Agent:
                     decision=decision,
                     duration_ms=duration_ms,
                 )
-                _notify_step(step)
+                _notify_step(step, on_step)
                 state = self._rebuild_state(
                     task=task,
                     tool_names=tool_names,
@@ -377,7 +446,7 @@ class Agent:
                     decision=answer,
                     duration_ms=duration_ms,
                 )
-                _notify_step(step)
+                _notify_step(step, on_step)
                 state = self._rebuild_state(
                     task=task,
                     tool_names=tool_names,
@@ -409,7 +478,7 @@ class Agent:
                 observation=observation,
                 duration_ms=duration_ms,
             )
-            _notify_step(step)
+            _notify_step(step, on_step)
             terminated = (
                 not result.is_success
                 and result.error is not None
@@ -426,6 +495,23 @@ class Agent:
                 ),
             )
 
+            if reflection_mode and not result.is_success and not terminated:
+                # 反思阶段：可重试的工具调用失败后，强制一步"总结原因 +
+                # 下一步方案"再继续。不传工具定义，模型只能输出文本 JSON
+                # 反思；解析失败有界重试一次，仍失败以
+                # MODEL_OUTPUT_PARSE_ERROR 终止（``continue`` 后循环在
+                # 顶部检查终止原因退出）。
+                messages, state = self._aux_phase(
+                    task=task,
+                    tool_names=tool_names,
+                    messages=messages,
+                    state=state,
+                    on_step=on_step,
+                    instruction=_REFLECTION_INSTRUCTION,
+                    allowed_kinds=frozenset({"reflection"}),
+                    kind_label="reflection",
+                )
+
             continue
 
         return state
@@ -441,6 +527,108 @@ class Agent:
             if on_chunk is not None:
                 on_chunk(chunk)
             yield chunk
+
+    def _aux_phase(
+        self,
+        *,
+        task: str,
+        tool_names: Sequence[str],
+        messages: list[Message],
+        state: AgentState,
+        on_step: Callable[[TraceStep], None] | None,
+        instruction: str,
+        allowed_kinds: frozenset[str],
+        kind_label: str,
+    ) -> tuple[list[Message], AgentState]:
+        """执行一次规划/反思特化阶段并返回更新后的消息与状态（R-06）。
+
+        步骤：追加稳定指令消息 -> 一次不传工具定义的模型调用 -> 按
+        ``allowed_kinds`` 受限解析 -> 成功则记录对应决策步骤；解析失败有界
+        重试一次（回写稳定错误反馈、消耗一步），仍失败以
+        ``MODEL_OUTPUT_PARSE_ERROR`` 终止。阶段本身受 ``max_steps`` 硬
+        预算约束：预算不足时直接以 ``MAX_STEPS_EXCEEDED`` 终止，不发起
+        模型调用。返回的 ``(messages, state)`` 与主循环共用同一套消息序列
+        与状态重建，保证 ``steps_used == len(trace)`` 不变量。
+        """
+
+        messages.append(Message(role=MessageRole.USER, content=instruction))
+        retried = False
+        while True:
+            if state.steps_used >= state.max_steps:
+                state = self._rebuild_state(
+                    task=task,
+                    tool_names=tool_names,
+                    messages=messages,
+                    steps_used=state.steps_used,
+                    trace=list(state.trace),
+                    termination_reason=TerminationReason.MAX_STEPS_EXCEEDED,
+                )
+                return messages, state
+
+            step_number = state.steps_used + 1
+            input_summary = _summarize_input(state)
+            started = time.perf_counter()
+            response = self._llm.complete(messages)
+            duration_ms = (time.perf_counter() - started) * 1_000.0
+            messages.append(response)
+
+            try:
+                decision = parse_decision(response.content, allowed=allowed_kinds)
+            except ParseError as exc:
+                retryable = not retried and step_number < state.max_steps
+                step = TraceStep(
+                    step_number=step_number,
+                    input_summary=input_summary,
+                    error=TraceError(
+                        code=exc.code,
+                        message=str(exc),
+                        retryable=retryable,
+                    ),
+                    duration_ms=duration_ms,
+                )
+                _notify_step(step, on_step)
+                trace = [*state.trace, step]
+                if not retryable:
+                    state = self._rebuild_state(
+                        task=task,
+                        tool_names=tool_names,
+                        messages=messages,
+                        steps_used=step_number,
+                        trace=trace,
+                        termination_reason=TerminationReason.MODEL_OUTPUT_PARSE_ERROR,
+                    )
+                    return messages, state
+                state = self._rebuild_state(
+                    task=task,
+                    tool_names=tool_names,
+                    messages=messages,
+                    steps_used=step_number,
+                    trace=trace,
+                )
+                messages.append(_aux_parse_feedback(exc, kind_label))
+                retried = True
+                continue
+
+            if not isinstance(decision, (Plan, Reflection)):
+                # 类型收窄的防御分支：allowed 已限定只接受 plan/reflection，
+                # 正常情况下不可达。
+                raise RuntimeError("特化阶段返回了未知决策类型")
+
+            step = TraceStep(
+                step_number=step_number,
+                input_summary=input_summary,
+                decision=decision,
+                duration_ms=duration_ms,
+            )
+            _notify_step(step, on_step)
+            state = self._rebuild_state(
+                task=task,
+                tool_names=tool_names,
+                messages=messages,
+                steps_used=step_number,
+                trace=[*state.trace, step],
+            )
+            return messages, state
 
     def _rebuild_state(
         self,

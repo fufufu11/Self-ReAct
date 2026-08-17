@@ -20,6 +20,8 @@ from self_react.models import (
     AgentState,
     FinalAnswer,
     Observation,
+    Plan,
+    Reflection,
     TerminationReason,
     ToolCall,
     ToolErrorCode,
@@ -106,8 +108,10 @@ def _render_header(state: AgentState) -> str:
     )
 
 
-def _render_decision(decision: ToolCall | FinalAnswer) -> list[str]:
-    """渲染决策行：最终回答或工具调用。"""
+def _render_decision(
+    decision: ToolCall | FinalAnswer | Plan | Reflection,
+) -> list[str]:
+    """渲染决策行：最终回答、工具调用，或 R-06 的计划/反思。"""
 
     if isinstance(decision, FinalAnswer):
         return [
@@ -119,6 +123,16 @@ def _render_decision(decision: ToolCall | FinalAnswer) -> list[str]:
             f"决策：调用工具 {decision.name}",
             f"调用编号：{decision.call_id}",
             f"参数：{_format_json(decision.arguments)}",
+        ]
+    if isinstance(decision, Plan):
+        return [
+            "决策：计划",
+            f"计划内容：{decision.content}",
+        ]
+    if isinstance(decision, Reflection):
+        return [
+            "决策：反思",
+            f"反思内容：{decision.content}",
         ]
     return ["决策：（未知）"]
 

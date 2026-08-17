@@ -22,6 +22,8 @@ from self_react.models import (
     Message,
     MessageRole,
     Observation,
+    Plan,
+    Reflection,
     TerminationReason,
     ToolCall,
     ToolErrorCode,
@@ -692,3 +694,78 @@ def test_end_to_end_non_retryable_failure_termination_renders() -> None:
     assert "观察（失败）：存储已满" in text
     assert "错误码：工具执行失败（TOOL_EXECUTION_ERROR）" in text
     assert "可重试：否" in text
+
+
+def _plan_json(content: str) -> Message:
+    """构造一条符合 R-06 规划契约的计划原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "plan", "content": content}, ensure_ascii=False)
+    )
+
+
+def _reflection_json(content: str) -> Message:
+    """构造一条符合 R-06 反思契约的反思原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "reflection", "content": content}, ensure_ascii=False)
+    )
+
+
+def test_render_plan_step_shows_plan_decision() -> None:
+    """轨迹中的 Plan 步骤渲染为"决策：计划 + 计划内容"。"""
+
+    step = TraceStep(
+        step_number=1,
+        decision=Plan(content="先调用计算器，再给出最终回答"),
+        duration_ms=1.25,
+    )
+
+    text = render_step(step)
+
+    assert "第 1 步" in text
+    assert "决策：计划" in text
+    assert "计划内容：先调用计算器，再给出最终回答" in text
+    assert "耗时：1.25 毫秒" in text
+
+
+def test_render_reflection_step_shows_reflection_decision() -> None:
+    """轨迹中的 Reflection 步骤渲染为"决策：反思 + 反思内容"。"""
+
+    step = TraceStep(
+        step_number=2,
+        decision=Reflection(content="检索失败，原因是主题不存在；下一步改用 react"),
+    )
+
+    text = render_step(step)
+
+    assert "第 2 步" in text
+    assert "决策：反思" in text
+    assert "反思内容：检索失败，原因是主题不存在；下一步改用 react" in text
+
+
+def test_end_to_end_plan_and_reflection_modes_render_in_trace() -> None:
+    """plan + reflection 同时开启时，轨迹文本包含计划与反思步骤。"""
+
+    llm = FakeLLM(
+        [
+            _plan_json("先检索 unknown-topic 失败，再改用 react"),
+            _tool_call_json("call-1", "retrieve", {"query": "unknown-topic"}),
+            _reflection_json("检索失败，原因是主题不存在；下一步改用 react"),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _final_answer_json("已找到 ReAct 的说明。"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+
+    state = Agent(llm=llm, registry=registry, max_steps=6).run(
+        "查一个主题", plan_mode=True, reflection_mode=True
+    )
+    text = render_trace(state)
+
+    assert "决策：计划" in text
+    assert "计划内容：先检索 unknown-topic 失败，再改用 react" in text
+    assert "决策：反思" in text
+    assert "反思内容：检索失败，原因是主题不存在；下一步改用 react" in text
+    assert "终止原因：最终回答（FINAL_ANSWER）" in text

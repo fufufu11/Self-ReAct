@@ -27,5 +27,8 @@ _避免_：把 TraceStep 当作完整对话消息或持久化数据库记录。
 **FinalAnswer**：模型决定结束当前运行时交付给调用方的回答。它是决策的一种，与请求工具的 ToolCall 互斥。
 _避免_：把任何 assistant Message 都当作最终回答。
 
+**Plan / Reflection**（R-06 可选模式）：规划阶段的执行计划与反思阶段的失败原因总结。二者都是决策的一种（与 FinalAnswer 同构，只含非空文本），仅在开启 `plan_mode` / `reflection_mode` 时出现，分别记录在 TraceStep 中供解释性展示。
+_避免_：把 Plan / Reflection 当作工具调用或最终回答，它们不参与工具分派。
+
 **TerminationReason**：循环停止时对外报告的最终原因，例如最终回答、步数耗尽、模型输出解析失败、未知工具或工具执行失败。可恢复的工具错误可以先作为 Observation 返回模型，只有控制器决定停止时才成为终止原因。
 _避免_：把每一次工具失败都直接当作不可恢复的终止。

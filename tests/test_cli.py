@@ -573,3 +573,95 @@ def test_run_stream_native_final_answer_prints_answer_once(
     assert captured.err == ""
     assert captured.out == "2 + 2 = 4。\n"
     assert captured.out.count("2 + 2 = 4。") == 1
+
+
+def _plan_json(content: str) -> Message:
+    """构造一条符合 R-06 规划契约的计划原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "plan", "content": content}, ensure_ascii=False)
+    )
+
+
+def _reflection_json(content: str) -> Message:
+    """构造一条符合 R-06 反思契约的反思原始输出。"""
+
+    return _json_message(
+        json.dumps({"kind": "reflection", "content": content}, ensure_ascii=False)
+    )
+
+
+def test_run_plan_flag_enables_plan_then_execute(
+    capsys: CaptureFixture[str],
+) -> None:
+    """``--plan`` 开启 plan-then-execute：轨迹包含计划步骤并计入步数。"""
+
+    factory = RecordingLLMFactory(
+        [
+            _plan_json("先调用计算器，再给出最终回答"),
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+
+    exit_code = main(
+        ["run", "计算 2 + 2", "--model", "fake", "--plan", "--show-trace"],
+        build_llm=factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "最终回答：结果是 4。" in captured.out
+    assert "决策：计划" in captured.out
+    assert "计划内容：先调用计算器，再给出最终回答" in captured.out
+    assert "步数：3 / 5" in captured.out
+
+
+def test_run_reflect_flag_enables_reflection_after_failure(
+    capsys: CaptureFixture[str],
+) -> None:
+    """``--reflect`` 开启 reflection：可重试失败后轨迹包含反思步骤。"""
+
+    factory = RecordingLLMFactory(
+        [
+            _tool_call_json("call-1", "retrieve", {"query": "unknown-topic"}),
+            _reflection_json("检索失败，原因是主题不存在；下一步改用 react"),
+            _tool_call_json("call-2", "retrieve", {"query": "react"}),
+            _final_answer_json("已找到 ReAct 的说明。"),
+        ]
+    )
+
+    exit_code = main(
+        ["run", "查一个主题", "--model", "fake", "--reflect", "--show-trace"],
+        build_llm=factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "最终回答：已找到 ReAct 的说明。" in captured.out
+    assert "决策：反思" in captured.out
+    assert "反思内容：检索失败，原因是主题不存在；下一步改用 react" in captured.out
+    assert "步数：4 / 5" in captured.out
+
+
+def test_run_rejects_both_mode_flags_are_off_by_default(
+    capsys: CaptureFixture[str],
+) -> None:
+    """默认（不带 --plan / --reflect）不产生计划或反思步骤。"""
+
+    factory = RecordingLLMFactory(
+        [
+            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
+            _final_answer_json("结果是 4。"),
+        ]
+    )
+
+    exit_code = main(
+        ["run", "计算 2 + 2", "--model", "fake", "--show-trace"],
+        build_llm=factory,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "决策：计划" not in captured.out
+    assert "决策：反思" not in captured.out

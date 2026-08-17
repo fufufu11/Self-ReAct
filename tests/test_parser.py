@@ -15,6 +15,8 @@ from self_react.models import (
     FinalAnswer,
     Message,
     MessageRole,
+    Plan,
+    Reflection,
     ToolCall,
     ToolErrorCode,
     TraceErrorCode,
@@ -404,3 +406,132 @@ def test_parsed_decision_can_enter_trace_step_as_day12_consumer() -> None:
     step = TraceStep(step_number=1, decision=decision)
 
     assert step.decision == decision
+
+
+def test_parse_plan_with_allowed_plan_kind() -> None:
+    """规划阶段（allowed 只含 plan）解析合法计划。"""
+
+    raw = '{"kind": "plan", "content": "先调用计算器，再给出最终回答"}'
+
+    decision = parse_decision(raw, allowed=frozenset({"plan"}))
+
+    assert decision == Plan(content="先调用计算器，再给出最终回答")
+    assert isinstance(decision, Plan)
+    assert decision.kind == "plan"
+
+
+def test_parse_reflection_with_allowed_reflection_kind() -> None:
+    """反思阶段（allowed 只含 reflection）解析合法反思。"""
+
+    raw = (
+        '{"kind": "reflection", "content": "检索失败，原因是主题不存在；'
+        '下一步改用 react"}'
+    )
+
+    decision = parse_decision(raw, allowed=frozenset({"reflection"}))
+
+    assert decision == Reflection(
+        content="检索失败，原因是主题不存在；下一步改用 react"
+    )
+    assert isinstance(decision, Reflection)
+    assert decision.kind == "reflection"
+
+
+def test_parse_plan_rejects_blank_or_non_string_content() -> None:
+    """plan 的 content 必须是非空字符串，其余类型返回稳定错误。"""
+
+    for raw in (
+        '{"kind": "plan", "content": ""}',
+        '{"kind": "plan", "content": "   "}',
+        '{"kind": "plan", "content": 123}',
+        '{"kind": "plan", "content": null}',
+    ):
+        with pytest.raises(ParseError):
+            parse_decision(raw, allowed=frozenset({"plan"}))
+
+
+def test_parse_reflection_rejects_blank_or_non_string_content() -> None:
+    """reflection 的 content 必须是非空字符串，其余类型返回稳定错误。"""
+
+    for raw in (
+        '{"kind": "reflection", "content": ""}',
+        '{"kind": "reflection", "content": "   "}',
+        '{"kind": "reflection", "content": 123}',
+        '{"kind": "reflection", "content": null}',
+    ):
+        with pytest.raises(ParseError):
+            parse_decision(raw, allowed=frozenset({"reflection"}))
+
+
+def test_parse_plan_and_reflection_reject_extra_fields() -> None:
+    """plan / reflection 的多余字段超出格式契约，应返回稳定错误。"""
+
+    with pytest.raises(ParseError):
+        parse_decision(
+            '{"kind": "plan", "content": "计划", "extra": true}',
+            allowed=frozenset({"plan"}),
+        )
+    with pytest.raises(ParseError):
+        parse_decision(
+            '{"kind": "reflection", "content": "反思", "extra": true}',
+            allowed=frozenset({"reflection"}),
+        )
+
+
+def test_restricted_parse_rejects_wrong_kind_with_stable_message() -> None:
+    """受限阶段拒绝非目标 kind，错误文本稳定且不泄漏原始输入。"""
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision(
+            '{"kind": "tool_call", "call_id": "c1", "name": "calculator", '
+            '"arguments": {}}',
+            allowed=frozenset({"plan"}),
+        )
+    assert "此阶段只接受 kind=plan" in str(exc.value)
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision(
+            '{"kind": "final_answer", "content": "答案"}',
+            allowed=frozenset({"reflection"}),
+        )
+    assert "此阶段只接受 kind=reflection" in str(exc.value)
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision(
+            '{"kind": "unknown", "content": "x"}', allowed=frozenset({"plan"})
+        )
+    assert "此阶段只接受 kind=plan" in str(exc.value)
+
+
+def test_default_parse_still_rejects_plan_and_reflection_kinds() -> None:
+    """默认模式（主循环）不接受 plan / reflection kind，错误文本与基线一致。"""
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision('{"kind": "plan", "content": "计划"}')
+    assert str(exc.value) == "kind 只能是 final_answer 或 tool_call"
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision('{"kind": "reflection", "content": "反思"}')
+    assert str(exc.value) == "kind 只能是 final_answer 或 tool_call"
+
+
+def test_default_parse_unknown_kind_message_is_unchanged() -> None:
+    """未知 kind 在默认模式下的错误文本必须与 R-06 之前完全一致。"""
+
+    with pytest.raises(ParseError) as exc:
+        parse_decision('{"kind": "answer", "content": "未知决策"}')
+    assert str(exc.value) == "kind 只能是 final_answer 或 tool_call"
+
+
+def test_parse_decision_rejects_invalid_allowed_argument() -> None:
+    """``allowed`` 必须是已知 kind 的非空 frozenset。"""
+
+    with pytest.raises(TypeError):
+        parse_decision('{"kind": "plan", "content": "x"}', allowed={"plan"})  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        parse_decision('{"kind": "plan", "content": "x"}', allowed=frozenset())
+    with pytest.raises(TypeError):
+        parse_decision(
+            '{"kind": "plan", "content": "x"}',
+            allowed=frozenset({"unknown_kind"}),
+        )
