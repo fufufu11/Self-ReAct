@@ -239,3 +239,144 @@ def test_log_query_execution_error_is_stable_at_tool_boundary(tmp_path: Path) ->
 
     with pytest.raises(ToolExecutionError):
         tool.execute({"path": "logs.ndjson"})
+
+
+def _restricted_log_query(tmp_path: Path) -> LogQueryTool:
+    """写一份样例日志并构造启用硬校验的日志查询工具。"""
+
+    file = tmp_path / "logs.ndjson"
+    file.write_text(_sample_text(), encoding="utf-8")
+    return LogQueryTool(
+        root_directory=tmp_path,
+        allowed_paths=("logs.ndjson",),
+        reject_digit_keyword=True,
+    )
+
+
+def test_log_query_allowed_paths_accepts_listed_file(tmp_path: Path) -> None:
+    """路径白名单放行允许的文件名。"""
+
+    tool = _restricted_log_query(tmp_path)
+
+    assert "匹配 5 条" in tool.execute({"path": "logs.ndjson"})
+
+
+def test_log_query_allowed_paths_rejects_other_files(tmp_path: Path) -> None:
+    """路径白名单拒绝白名单之外的文件名，并列出允许值。"""
+
+    tool = _restricted_log_query(tmp_path)
+
+    with pytest.raises(ToolArgumentError) as exc:
+        tool.execute({"path": "deploys.ndjson"})
+    assert "logs.ndjson" in str(exc.value)
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = registry.execute(
+        ToolCall(
+            call_id="call-1",
+            name="log_query",
+            arguments={"path": "runbook.ndjson"},
+        )
+    )
+    assert result.is_success is False
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+    assert result.error.retryable is True
+    assert "logs.ndjson" in result.error.message
+
+
+def test_log_query_rejects_service_not_present_in_data(tmp_path: Path) -> None:
+    """service 必须是数据中实际存在的主机名；站点名等非法值被稳定拒绝。"""
+
+    tool = _restricted_log_query(tmp_path)
+
+    with pytest.raises(ToolArgumentError) as exc:
+        tool.execute({"path": "logs.ndjson", "service": "promjet"})
+    message = str(exc.value)
+    assert "promjet" in message
+    assert "主机名" in message
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = registry.execute(
+        ToolCall(
+            call_id="call-1",
+            name="log_query",
+            arguments={"path": "logs.ndjson", "service": "promjet"},
+        )
+    )
+    assert result.is_success is False
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+    assert result.error.retryable is True
+
+
+def test_log_query_accepts_service_present_in_data_even_without_match(
+    tmp_path: Path,
+) -> None:
+    """数据中存在但无匹配的 service 仍正常返回 0 条（不误伤合法空查询）。"""
+
+    tool = _restricted_log_query(tmp_path)
+
+    output = tool.execute(
+        {
+            "path": "logs.ndjson",
+            "service": "b",
+            "time_start": "2026-08-12 10:00:00",
+            "time_end": "2026-08-12 10:59:59",
+        }
+    )
+    assert "匹配 0 条 / 共 5 条" in output
+
+
+def test_log_query_rejects_digit_keyword_when_enabled(tmp_path: Path) -> None:
+    """reject_digit_keyword=True 时全数字 keyword 被拒绝并引导用 error_code。"""
+
+    tool = _restricted_log_query(tmp_path)
+
+    with pytest.raises(ToolArgumentError) as exc:
+        tool.execute({"path": "logs.ndjson", "keyword": "404"})
+    assert "error_code" in str(exc.value)
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = registry.execute(
+        ToolCall(
+            call_id="call-1",
+            name="log_query",
+            arguments={"path": "logs.ndjson", "keyword": "500"},
+        )
+    )
+    assert result.is_success is False
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+
+
+def test_log_query_digit_keyword_allowed_by_default(tmp_path: Path) -> None:
+    """默认不拒绝全数字 keyword（既有行为不变）。"""
+
+    file = tmp_path / "logs.ndjson"
+    file.write_text(_sample_text(), encoding="utf-8")
+    tool = LogQueryTool(root_directory=tmp_path)
+
+    output = tool.execute({"path": "logs.ndjson", "keyword": "500"})
+
+    assert "匹配 0 条 / 共 5 条" in output
+
+
+def test_log_query_rejects_invalid_hardening_config() -> None:
+    """allowed_paths 与 reject_digit_keyword 的非法构造参数被明确拒绝。"""
+
+    with pytest.raises(TypeError):
+        LogQueryTool(  # type: ignore[arg-type]
+            root_directory="C:/allowed", allowed_paths="logs.ndjson"
+        )
+    with pytest.raises(ValueError):
+        LogQueryTool(root_directory="C:/allowed", allowed_paths=())
+    with pytest.raises(ValueError):
+        LogQueryTool(root_directory="C:/allowed", allowed_paths=("",))
+    with pytest.raises(TypeError):
+        LogQueryTool(  # type: ignore[arg-type]
+            root_directory="C:/allowed", reject_digit_keyword=1
+        )

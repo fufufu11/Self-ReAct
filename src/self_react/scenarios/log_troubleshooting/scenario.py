@@ -50,6 +50,13 @@ log-troubleshooting`` 与三个场景示例透传给 ``Agent.run`` 的
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 """场景数据的根目录：``file_reader`` 与 ``log_query`` 的安全边界。"""
 
+_LOG_QUERY_ALLOWED_PATHS = ("logs.ndjson", "runbook.ndjson", "deploys.ndjson")
+"""``log_query`` 允许读取的文件名白名单（defense-in-depth，对应指引 1）。"""
+
+_FILE_READER_ALLOWED_PATHS = ("deploys.ndjson",)
+"""``file_reader`` 允许读取的文件名白名单（defense-in-depth，对应指引 4：
+发布记录经 file_reader 读取，logs.ndjson / runbook.ndjson 被硬拒绝）。"""
+
 
 def _load_runbook_entries() -> list[RunbookEntry]:
     """从固定 fixture 读取并校验 runbook 条目。"""
@@ -63,12 +70,29 @@ def _load_runbook_entries() -> list[RunbookEntry]:
 
 
 def build_registry() -> ToolRegistry:
-    """构造日志/故障排查场景的工具注册表。"""
+    """构造日志/故障排查场景的工具注册表。
+
+    defense-in-depth（Issue #77）：``log_query`` 启用路径白名单（三个固定
+    数据文件）与全数字 keyword 拒绝，``file_reader`` 启用路径白名单（只读
+    发布记录），把 R-10 提示词软约束变成工具边界内的硬校验；service 参数
+    在查询时按文件数据校验（拒绝站点名等非法值）。
+    """
 
     registry = ToolRegistry()
     registry.register(CalculatorTool())
-    registry.register(FileReaderTool(root_directory=_DATA_DIR))
-    registry.register(LogQueryTool(root_directory=_DATA_DIR))
+    registry.register(
+        FileReaderTool(
+            root_directory=_DATA_DIR,
+            allowed_paths=_FILE_READER_ALLOWED_PATHS,
+        )
+    )
+    registry.register(
+        LogQueryTool(
+            root_directory=_DATA_DIR,
+            allowed_paths=_LOG_QUERY_ALLOWED_PATHS,
+            reject_digit_keyword=True,
+        )
+    )
     registry.register(RunbookSearchTool(entries=_load_runbook_entries()))
     registry.register(FinalAnswerTool())
     return registry

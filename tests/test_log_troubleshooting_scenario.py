@@ -261,3 +261,97 @@ def test_run_without_scenario_does_not_inject_scenario_guidance(
     assert llm.call_count == 1
     assert SCENARIO_EXTRA_INSTRUCTIONS.strip() not in llm.calls[0][0].content
     assert captured.out == "最终回答：完成。\n"
+
+
+def _scenario_execute(
+    registry: object, name: str, arguments: dict[str, object]
+) -> tuple[bool, str | None]:
+    """直接执行场景注册表里的工具，返回 (是否成功, 错误消息)。"""
+
+    from self_react.models import ToolCall, ToolErrorCode
+
+    tool = registry.get(name)
+    assert tool is not None
+    call = ToolCall(call_id="call-1", name=name, arguments=arguments)
+    result = registry.execute(call)
+    if result.is_success:
+        return True, None
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+    assert result.error.retryable is True
+    return False, result.error.message
+
+
+def test_scenario_log_query_rejects_site_name_as_service() -> None:
+    """场景硬校验：把站点名 promjet 当 service 过滤值被稳定拒绝并引导。"""
+
+    registry = build_registry()
+
+    ok, message = _scenario_execute(
+        registry, "log_query", {"path": "logs.ndjson", "service": "promjet"}
+    )
+
+    assert ok is False
+    assert message is not None
+    assert "promjet" in message
+    assert "主机名" in message
+
+
+def test_scenario_log_query_rejects_digit_keyword() -> None:
+    """场景硬校验：把状态码当 keyword 过滤被稳定拒绝并引导用 error_code。"""
+
+    registry = build_registry()
+
+    ok, message = _scenario_execute(
+        registry, "log_query", {"path": "logs.ndjson", "keyword": "404"}
+    )
+
+    assert ok is False
+    assert message is not None
+    assert "error_code" in message
+
+
+def test_scenario_log_query_rejects_path_outside_three_files() -> None:
+    """场景硬校验：log_query 的 path 只能填三个固定数据文件名。"""
+
+    registry = build_registry()
+
+    ok, message = _scenario_execute(registry, "log_query", {"path": "app.log"})
+
+    assert ok is False
+    assert message is not None
+    assert "logs.ndjson" in message
+    assert "runbook.ndjson" in message
+    assert "deploys.ndjson" in message
+
+
+def test_scenario_log_query_accepts_three_data_files() -> None:
+    """场景硬校验：三个固定数据文件都能被 log_query 查询。"""
+
+    registry = build_registry()
+
+    for path in ("logs.ndjson", "runbook.ndjson", "deploys.ndjson"):
+        ok, _ = _scenario_execute(registry, "log_query", {"path": path})
+        assert ok is True, path
+
+
+def test_scenario_file_reader_rejects_logs_and_runbook() -> None:
+    """场景硬校验：file_reader 只读发布记录，logs/runbook 被硬拒绝。"""
+
+    registry = build_registry()
+
+    for path in ("logs.ndjson", "runbook.ndjson"):
+        ok, message = _scenario_execute(registry, "file_reader", {"path": path})
+        assert ok is False, path
+        assert message is not None
+        assert "deploys.ndjson" in message
+
+
+def test_scenario_file_reader_accepts_deploys() -> None:
+    """场景硬校验：file_reader 可读发布记录 deploys.ndjson。"""
+
+    registry = build_registry()
+
+    ok, _ = _scenario_execute(registry, "file_reader", {"path": "deploys.ndjson"})
+
+    assert ok is True
