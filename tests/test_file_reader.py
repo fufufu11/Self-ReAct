@@ -722,3 +722,57 @@ def test_file_reader_consumes_tool_call_returned_by_fake_llm(
     assert tool_message.role is MessageRole.TOOL
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.content == "你好"
+
+
+def test_file_reader_allowed_paths_accepts_listed_file(tmp_path: Path) -> None:
+    """路径白名单放行允许的文件名。"""
+
+    (tmp_path / "deploys.ndjson").write_text("发布记录", encoding="utf-8")
+    tool = FileReaderTool(
+        root_directory=tmp_path,
+        allowed_paths=("deploys.ndjson",),
+    )
+
+    assert tool.execute({"path": "deploys.ndjson"}) == "发布记录"
+
+
+def test_file_reader_allowed_paths_rejects_other_files(tmp_path: Path) -> None:
+    """路径白名单拒绝白名单之外的文件名，并列出允许值。"""
+
+    (tmp_path / "logs.ndjson").write_text("日志", encoding="utf-8")
+    tool = FileReaderTool(
+        root_directory=tmp_path,
+        allowed_paths=("deploys.ndjson",),
+    )
+
+    with pytest.raises(ToolArgumentError) as exc:
+        tool.execute({"path": "logs.ndjson"})
+    assert "deploys.ndjson" in str(exc.value)
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = registry.execute(
+        ToolCall(
+            call_id="call-1",
+            name="file_reader",
+            arguments={"path": "logs.ndjson"},
+        )
+    )
+    assert result.is_success is False
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+    assert result.error.retryable is True
+    assert "deploys.ndjson" in result.error.message
+
+
+def test_file_reader_rejects_invalid_allowed_paths_config() -> None:
+    """allowed_paths 必须是包含非空字符串的非空序列。"""
+
+    with pytest.raises(TypeError):
+        FileReaderTool(  # type: ignore[arg-type]
+            root_directory="C:/allowed", allowed_paths="deploys.ndjson"
+        )
+    with pytest.raises(ValueError):
+        FileReaderTool(root_directory="C:/allowed", allowed_paths=())
+    with pytest.raises(ValueError):
+        FileReaderTool(root_directory="C:/allowed", allowed_paths=("",))

@@ -1,4 +1,4 @@
-"""确定性 NDJSON 日志查询与聚合工具（R-07）。
+"""确定性 NDJSON 日志查询与聚合工具（R-07；Issue #77 增加参数硬校验）。
 
 ``LogQueryTool`` 在构造时固定的根目录内读取 JSON Lines（NDJSON）日志文件，
 按服务、级别、错误码、关键词与时间窗过滤，并返回命中行、命中数与文件总数；
@@ -10,6 +10,15 @@
 缺失、文件不存在、目标不是常规文件、JSON 解析失败等业务问题抛
 ``ToolExecutionError``（注册表转 ``TOOL_EXECUTION_ERROR``）。返回命中行数量由
 ``limit`` 限制，避免把超大文件塞进模型上下文。
+
+defense-in-depth（Issue #77）增加三处可选的硬校验，把场景提示词的软约束变成
+工具边界内的稳定拒绝（默认全部关闭，关闭时行为与之前逐字节一致）：
+
+- ``allowed_paths``：非 None 时 ``path`` 必须精确等于其中一个文件名；
+- ``reject_digit_keyword``：True 时 ``keyword`` 为全 ASCII 数字即拒绝，
+  引导改用 ``error_code``；
+- service 数据驱动校验：``service`` 必须是被查询文件内实际存在的主机名，
+  站点名等非法值在工具边界被稳定拒绝（无需构造配置，按文件数据判断）。
 """
 
 from __future__ import annotations
@@ -17,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,8 +90,19 @@ class LogQueryParameters(BaseModel):
     )
 
 
-def _extract_arguments(arguments: JsonObject) -> dict[str, object]:
-    """从参数字典中取出并校验日志查询参数。"""
+def _extract_arguments(
+    arguments: JsonObject,
+    *,
+    allowed_paths: tuple[str, ...] | None = None,
+    reject_digit_keyword: bool = False,
+) -> dict[str, object]:
+    """从参数字典中取出并校验日志查询参数。
+
+    ``allowed_paths`` 非 None 时 ``path`` 必须精确等于其中一个文件名；
+    ``reject_digit_keyword`` 为 True 时全 ASCII 数字的 ``keyword`` 被拒绝，
+    引导改用 ``error_code``。二者都是构造时配置（默认关闭），关闭时行为与
+    defense-in-depth 之前一致。
+    """
 
     allowed = {
         "path",
@@ -105,6 +126,8 @@ def _extract_arguments(arguments: JsonObject) -> dict[str, object]:
         raise ToolArgumentError("路径过长")
     if "\x00" in path:
         raise ToolArgumentError("路径不能包含空字节")
+    if allowed_paths is not None and path not in allowed_paths:
+        raise ToolArgumentError(f"path 只能是 {'、'.join(allowed_paths)} 之一")
 
     normalized: dict[str, object] = {"path": path}
     for name in ("service", "level", "error_code", "keyword", "time_start", "time_end"):
@@ -112,6 +135,18 @@ def _extract_arguments(arguments: JsonObject) -> dict[str, object]:
         if value is not None and not isinstance(value, str):
             raise ToolArgumentError(f"{name} 必须是字符串")
         normalized[name] = value
+
+    keyword = normalized["keyword"]
+    if (
+        reject_digit_keyword
+        and isinstance(keyword, str)
+        and keyword.isascii()
+        and keyword.isdigit()
+    ):
+        raise ToolArgumentError(
+            "keyword 不能是全数字：状态码请用 error_code 参数过滤，"
+            "keyword 只匹配 message（请求行）子串"
+        )
 
     for name in ("time_start", "time_end"):
         value = normalized[name]
@@ -133,6 +168,25 @@ def _extract_arguments(arguments: JsonObject) -> dict[str, object]:
         raise ToolArgumentError(f"limit 必须在 1 到 {MAX_LIMIT} 之间")
     normalized["limit"] = limit
     return normalized
+
+
+def _reject_unknown_service(service: str, lines: Sequence[dict[str, object]]) -> None:
+    """拒绝不在被查询文件数据中的 service 值（defense-in-depth）。
+
+    只把"该文件里根本不存在"的 service 值当作非法（如把站点名当主机名），
+    数据中存在但过滤后无匹配的合法值仍正常返回 0 条，不误伤空查询。
+    """
+
+    distinct = {
+        str(line.get("service"))
+        for line in lines
+        if isinstance(line.get("service"), str) and line.get("service")
+    }
+    if service not in distinct:
+        raise ToolArgumentError(
+            f"service 值 {service!r} 在该文件中不存在；service 必须是数据中"
+            "实际存在的主机名，不要用站点名等值"
+        )
 
 
 def _reject_unsafe_path(candidate: Path) -> None:
@@ -289,7 +343,13 @@ def _format_group(
 
 
 class LogQueryTool:
-    """在允许的根目录内读取 NDJSON 日志并做过滤/聚合的确定性工具。"""
+    """在允许的根目录内读取 NDJSON 日志并做过滤/聚合的确定性工具。
+
+    ``allowed_paths``（可选）非 None 时把 ``path`` 限定为列出的文件名；
+    ``reject_digit_keyword``（可选）为 True 时拒绝全 ASCII 数字的
+    ``keyword``。二者默认关闭，关闭时行为与 defense-in-depth 之前一致；
+    service 参数在查询时按文件数据校验（见 :func:`_reject_unknown_service`）。
+    """
 
     name = "log_query"
     description = (
@@ -301,29 +361,63 @@ class LogQueryTool:
     )
     parameters: JsonObject = generate_parameters_schema(LogQueryParameters)
 
-    def __init__(self, root_directory: str | os.PathLike[str]) -> None:
-        """固定允许读取的根目录；该目录是工具的安全边界。"""
+    def __init__(
+        self,
+        root_directory: str | os.PathLike[str],
+        *,
+        allowed_paths: Sequence[str] | None = None,
+        reject_digit_keyword: bool = False,
+    ) -> None:
+        """固定允许读取的根目录，并保存可选的硬校验配置。"""
 
         if not isinstance(root_directory, (str, os.PathLike)):
             raise TypeError("root_directory 必须是路径")
         if isinstance(root_directory, str) and not root_directory.strip():
             raise ValueError("root_directory 不能为空")
+        if not isinstance(reject_digit_keyword, bool):
+            raise TypeError("reject_digit_keyword 必须是布尔值")
+        if allowed_paths is not None:
+            if isinstance(allowed_paths, (str, bytes)) or not isinstance(
+                allowed_paths, Sequence
+            ):
+                raise TypeError("allowed_paths 必须是路径序列")
+            if not allowed_paths:
+                raise ValueError("allowed_paths 不能为空")
+            normalized_paths = tuple(allowed_paths)
+            if not all(
+                isinstance(name, str) and name.strip() for name in normalized_paths
+            ):
+                raise ValueError("allowed_paths 的每一项都必须是非空字符串")
+        else:
+            normalized_paths = None
+
         self.root = Path(root_directory)
+        self.allowed_paths = normalized_paths
+        self.reject_digit_keyword = reject_digit_keyword
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次日志查询并返回稳定文本。"""
 
-        args = _extract_arguments(arguments)
+        args = _extract_arguments(
+            arguments,
+            allowed_paths=self.allowed_paths,
+            reject_digit_keyword=self.reject_digit_keyword,
+        )
         resolved = _resolve_safe_path(str(args["path"]), self.root)
         lines = _load_lines(resolved)
         total = len(lines)
+
+        service = args["service"]
+        if service is not None:
+            assert isinstance(service, str)
+            _reject_unknown_service(service, lines)
 
         matched = [
             line
             for line in lines
             if _matches(
                 line,
-                service=args["service"],  # type: ignore[arg-type]
+                service=service,
                 level=args["level"],  # type: ignore[arg-type]
                 error_code=args["error_code"],  # type: ignore[arg-type]
                 keyword=args["keyword"],  # type: ignore[arg-type]

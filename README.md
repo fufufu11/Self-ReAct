@@ -27,6 +27,9 @@ Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态�
 - 可选规划/反思模式（R-06）：`run --plan` 任务开始先输出结构化计划再执行；
   `run --reflect` 工具失败后强制一步"总结原因 + 下一步方案"再继续；默认关闭，
   开启与否不影响既有行为。
+- 工具参数硬校验（可选，Issue #77）：`log_query` / `file_reader` 支持路径白名单
+  与全数字 keyword 拒绝，`log_query` 的 `service` 参数按数据校验（拒绝站点名等
+  非法值），把场景提示词软约束变成工具边界内的第二道防线；默认关闭。
 - 命令行入口：`hello` / `run` / `example`。
 - 全离线可测：自动化测试使用 Fake LLM 与注入客户端，不访问网络、不依赖真实 API Key。
 
@@ -345,6 +348,24 @@ R-09 用 promjet.ru 2021-12 真实 Apache 访问日志（GitHub
 （计划/反思写入轨迹）与收敛性（场景任务少用一步完成）均有提升。真实调用
 结果非确定性，不作为自动化测试前置条件；离线确定性的八个 `example` 命令
 是可复现基准。
+
+### 工具参数硬校验（Day 32 / Issue #77）
+
+defense-in-depth 把 R-10 场景提示词的软约束变成工具边界内的硬校验（默认
+关闭，不影响通用用法）：`log_query` / `file_reader` 支持路径白名单与全数字
+keyword 拒绝，`log_query` 的 `service` 参数按被查询文件的数据校验（拒绝站点
+名等非法值）。
+
+2026-08-17 用真实 DeepSeek（`deepseek-v4-flash`）验收：
+
+| 任务 | 结果 |
+| --- | --- |
+| 标准场景任务（--scenario --plan --reflect） | 6/8 FINAL_ANSWER，结论完整正确；硬约束未阻碍合法用法 |
+| 诱导"用 keyword 过滤状态码" | FINAL_ANSWER：模型自觉用 error_code（软约束+硬约束双保险） |
+| 强制"service 值必须用 promjet" | 第 1 步被工具以 INVALID_ARGUMENTS 拒绝（"service 必须是数据中实际存在的主机名"），模型引用拒绝消息并诚实说明无法统计，未编造结果 |
+
+真实调用结果非确定性，不作为自动化测试前置条件；离线确定性的八个
+`example` 命令是可复现基准。
 
 ### 3分钟讲解
 

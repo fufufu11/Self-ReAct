@@ -1,4 +1,4 @@
-"""受限文件读取业务工具（Day 9）。
+"""受限文件读取业务工具（Day 9；Issue #77 增加可选路径白名单）。
 
 ``FileReaderTool`` 只在构造时指定的根目录内读取 UTF-8 文本文件。参数
 ``path`` 必须是相对路径：绝对路径、盘符路径、UNC 路径、包含 ``..`` 的路径
@@ -11,11 +11,16 @@
 返回 ``MAX_OUTPUT_CHARS`` 个字符，超出部分截断并附加标记。Day 23
 （R-03）起，参数 JSON Schema 由 ``FileReaderParameters`` 参数模型自动
 生成，注册表在业务校验之前按 Schema 预校验参数。
+
+defense-in-depth（Issue #77）：可选构造参数 ``allowed_paths`` 非 None 时
+``path`` 必须精确等于其中一个文件名，把"只读固定数据文件"的提示词软约束
+变成工具边界内的稳定拒绝（默认 None 不限制，行为与之前一致）。
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,8 +57,16 @@ class FileReaderParameters(BaseModel):
     path: str = Field(description="允许目录内的相对路径，例如 notes/todo.txt")
 
 
-def _extract_path(arguments: JsonObject) -> str:
-    """从参数字典中取出并校验 path 字符串。"""
+def _extract_path(
+    arguments: JsonObject,
+    *,
+    allowed_paths: tuple[str, ...] | None = None,
+) -> str:
+    """从参数字典中取出并校验 path 字符串。
+
+    ``allowed_paths`` 非 None 时 ``path`` 必须精确等于其中一个文件名
+    （defense-in-depth 可选硬校验，默认关闭）。
+    """
 
     unexpected = sorted(set(arguments) - {"path"})
     if unexpected:
@@ -68,6 +81,8 @@ def _extract_path(arguments: JsonObject) -> str:
         raise ToolArgumentError("路径过长")
     if "\x00" in path:
         raise ToolArgumentError("路径不能包含空字节")
+    if allowed_paths is not None and path not in allowed_paths:
+        raise ToolArgumentError(f"path 只能是 {'、'.join(allowed_paths)} 之一")
     return path
 
 
@@ -133,7 +148,9 @@ class FileReaderTool:
     """只在允许的根目录内读取常规文本文件的确定性工具。
 
     根目录是工具的配置（安全边界），不是每次调用的参数：调用方只能传根目录
-    内的相对路径。工具本身不持有注册表、消息或密钥。
+    内的相对路径。``allowed_paths``（可选）非 None 时把 ``path`` 限定为列出
+    的文件名，把"只读固定数据文件"的提示词软约束变成工具边界内的稳定拒绝；
+    默认 None 不限制。工具本身不持有注册表、消息或密钥。
     """
 
     name = "file_reader"
@@ -144,19 +161,40 @@ class FileReaderTool:
     )
     parameters: JsonObject = generate_parameters_schema(FileReaderParameters)
 
-    def __init__(self, root_directory: str | os.PathLike[str]) -> None:
-        """固定允许读取的根目录；该目录是工具的安全边界。"""
+    def __init__(
+        self,
+        root_directory: str | os.PathLike[str],
+        *,
+        allowed_paths: Sequence[str] | None = None,
+    ) -> None:
+        """固定允许读取的根目录，并保存可选的路径白名单配置。"""
 
         if not isinstance(root_directory, (str, os.PathLike)):
             raise TypeError("root_directory 必须是路径")
         if isinstance(root_directory, str) and not root_directory.strip():
             raise ValueError("root_directory 不能为空")
+        if allowed_paths is not None:
+            if isinstance(allowed_paths, (str, bytes)) or not isinstance(
+                allowed_paths, Sequence
+            ):
+                raise TypeError("allowed_paths 必须是路径序列")
+            if not allowed_paths:
+                raise ValueError("allowed_paths 不能为空")
+            normalized_paths = tuple(allowed_paths)
+            if not all(
+                isinstance(name, str) and name.strip() for name in normalized_paths
+            ):
+                raise ValueError("allowed_paths 的每一项都必须是非空字符串")
+        else:
+            normalized_paths = None
+
         self.root = Path(root_directory)
+        self.allowed_paths = normalized_paths
 
     def execute(self, arguments: JsonObject) -> str:
         """执行一次文件读取并返回文本内容。"""
 
-        path_text = _extract_path(arguments)
+        path_text = _extract_path(arguments, allowed_paths=self.allowed_paths)
         resolved = _resolve_safe_path(path_text, self.root)
         return _read_text(resolved)
 
