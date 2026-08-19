@@ -25,6 +25,22 @@
   探测与真实访客标识）；本 fixture 的规范化流程**丢弃了 IP、UA、Referer 列**，
   只保留时间戳、请求行与状态码，避免带入个人标识信息。
 
+## PII 扫描说明（roadmap 10.7）
+
+对原始整月文件（`tmp/promjetDec2021.log`，137,510 行）做 PII 模式正则扫描，
+结果如下（2026-08-19 实测；模式口径与 `tests/test_fixture_pii.py` 一致）：
+
+| 模式 | 匹配数 | 说明 |
+| --- | --- | --- |
+| 邮箱 | 41 | 6 个去重值，全部来自 User-Agent 列中的爬虫/扫描器标识（`scaninfo@expanseinc.com`、`+info@netcraft.com`、`bot@linkfluence.com`、`crawler@mixrank.com`、`help@moz.com`、`cargo@kontur.ru`），**非个人邮箱** |
+| `mailto:` URL | 0 | promjet 原始数据无 mailto 链接（roadmap 10.7 原文基于旧 NASA fixture 的 618 处邮箱不适用于现状） |
+| SSN（`\d{3}-\d{2}-\d{4}`） | 0 | — |
+| 北美电话格式（`\d{3}-\d{3}-\d{4}`） | 3 | 全部为产品型号编码（`.../Вентиль-ВК-97-Джет-000-230-0001.jpg`，阀门商品编号），**非电话号码** |
+
+上述内容所在列（IP / User-Agent / Referer）在规范化时全部丢弃，仅时间戳、
+请求行与状态码进入 fixture；截取窗口（2021-12-17 03:00-03:59）内亦无上述
+匹配。入库 fixture 的零 PII 由守卫测试（`tests/test_fixture_pii.py`）持续保证。
+
 ## 截取窗口
 
 - 时间窗：`2021-12-17 03:00:00 ~ 2021-12-17 03:59:59`（固定 1 小时）。
