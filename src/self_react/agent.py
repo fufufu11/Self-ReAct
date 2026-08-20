@@ -4,17 +4,20 @@
 Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上下文请求模型，把模型
 原始输出解析成 ``FinalAnswer`` 或 ``ToolCall``，工具调用交给注册表执行并把
 ``ToolResult`` 转成 ``Observation`` 写回上下文，直到给出最终回答、解析失败
-（至多一次重试后仍失败）、遇到不可恢复的工具失败或步数预算耗尽。
+（每个失败序列达到有界重试上限后仍失败）、遇到不可恢复的工具失败或步数预算
+耗尽。
 
 循环控制器（``Agent``）拥有唯一的步数计数与终止判断；``AgentState`` 是唯一
 运行状态，只保存任务、消息、可用工具名称、步数预算、轨迹和终止信息，不保存
 模型客户端、注册表、密钥或其他不可序列化运行时资源。本模块不实现适配器级
 重试、异步、持久化或并行工具调度；流式通过可选 ``stream`` 参数消费
 ``complete_stream`` 的增量并组装出与非流式完全相同的消息。``LLM.complete``
-抛出的适配器错误按原样向上传播，由调用方决定如何处理。解析失败只做至多
-一次的有界重试：把
-稳定错误消息回写给模型、消耗一步预算；重试仍失败或预算不足以发起重试时，以
-``MODEL_OUTPUT_PARSE_ERROR`` 终止，杜绝解析重试的无限子循环。重复动作（复用
+抛出的适配器错误按原样向上传播，由调用方决定如何处理。主循环文本 JSON
+解析失败做每个失败序列的有界重试（默认上限 2 次，可用 ``parse_retry_limit``
+配置，置 0 关闭）：把稳定错误消息回写给模型、消耗一步预算；重试资格在任一
+解析成功或原生工具调用后恢复，连续失败达到上限或预算不足以发起重试时，以
+``MODEL_OUTPUT_PARSE_ERROR`` 终止，杜绝解析重试的无限子循环。规划/反思的
+特化阶段仍保持至多一次的有界重试。重复动作（复用
 ``call_id`` 或同一工具连续使用相同参数）在分派前被拦截，作为带
 ``REPEATED_ACTION`` 错误码且可重试的失败观察回写，让模型在预算内换一种方式
 继续。
@@ -74,6 +77,9 @@ _QUERY_TOOL_NAMES = frozenset({"log_query", "retrieve", "runbook_search"})
 
 _REPEATED_QUERY_LIMIT_DEFAULT = 3
 """查询类工具连调触发收尾引导的默认阈值。"""
+
+_PARSE_RETRY_LIMIT_DEFAULT = 2
+"""主循环文本 JSON 解析失败每个失败序列的重试次数默认上限。"""
 
 _REPEATED_QUERY_MESSAGE = (
     "连续查询次数已达上限：{} 及其同类查询不会带来新信息，"
@@ -194,8 +200,9 @@ class Agent:
         max_steps: int,
         context_policy: ContextPolicy | None = None,
         repeated_query_limit: int = _REPEATED_QUERY_LIMIT_DEFAULT,
+        parse_retry_limit: int = _PARSE_RETRY_LIMIT_DEFAULT,
     ) -> None:
-        """校验并保存循环依赖、步数预算、上下文策略与查询连调阈值。"""
+        """校验并保存循环依赖、步数预算、上下文策略、查询连调阈值与解析重试上限。"""
 
         if not isinstance(llm, LLM):
             raise TypeError("llm 必须满足 LLM 协议")
@@ -213,12 +220,19 @@ class Agent:
             raise ValueError("repeated_query_limit 必须是非负整数")
         if repeated_query_limit < 0:
             raise ValueError("repeated_query_limit 必须是非负整数")
+        if isinstance(parse_retry_limit, bool) or not isinstance(
+            parse_retry_limit, int
+        ):
+            raise ValueError("parse_retry_limit 必须是非负整数")
+        if parse_retry_limit < 0:
+            raise ValueError("parse_retry_limit 必须是非负整数")
 
         self._llm = llm
         self._registry = registry
         self._max_steps = max_steps
         self._context_policy = context_policy
         self._repeated_query_limit = repeated_query_limit
+        self._parse_retry_limit = parse_retry_limit
 
     def run(
         self,
@@ -304,7 +318,7 @@ class Agent:
                 kind_label="plan",
             )
 
-        parse_retried = False
+        parse_retry_count = 0
         consecutive_queries = 0
         while not state.is_terminated:
             if state.steps_used >= state.max_steps:
@@ -373,6 +387,7 @@ class Agent:
                         steps_used=step_number,
                         trace=[*state.trace, step],
                     )
+                    parse_retry_count = 0
                     continue
                 # 供应商原生工具调用：每轮一个工具，直接作为本轮决策，
                 # 不经过文本 JSON 解析。
@@ -381,10 +396,15 @@ class Agent:
                 try:
                     decision = parse_decision(response.content)
                 except ParseError as exc:
-                    # 解析失败有界重试：至多重试一次。第一次失败回写稳定
-                    # 错误消息并消耗一步预算；重试仍失败或预算不足以发起
-                    # 重试时，以 MODEL_OUTPUT_PARSE_ERROR 终止。
-                    retryable = not parse_retried and step_number < state.max_steps
+                    # 解析失败有界重试：每个失败序列默认最多重试
+                    # parse_retry_limit 次。失败回写稳定错误消息并消耗一步
+                    # 预算，重试资格在任一解析成功或原生工具调用后恢复；
+                    # 连续失败达到上限或预算不足以发起重试时，以
+                    # MODEL_OUTPUT_PARSE_ERROR 终止。
+                    retryable = (
+                        parse_retry_count < self._parse_retry_limit
+                        and step_number < state.max_steps
+                    )
                     step = TraceStep(
                         step_number=step_number,
                         input_summary=input_summary,
@@ -415,7 +435,7 @@ class Agent:
                         trace=trace,
                     )
                     messages.append(_parse_error_feedback(exc))
-                    parse_retried = True
+                    parse_retry_count += 1
                     continue
                 if isinstance(decision, ToolCall) and not response.tool_calls:
                     # 文本 JSON 工具调用补成原生 tool_calls 写回历史：OpenAI
@@ -427,6 +447,7 @@ class Agent:
                         tool_calls=[decision],
                     )
 
+            parse_retry_count = 0
             if isinstance(decision, FinalAnswer):
                 step = TraceStep(
                     step_number=step_number,
