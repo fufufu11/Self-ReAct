@@ -407,34 +407,38 @@ def test_parse_error_retry_once_then_tool_call_and_final_answer() -> None:
 
 
 def test_parse_error_retry_still_fails_terminates() -> None:
-    """解析失败重试仍失败：第二次失败不再重试，以 MODEL_OUTPUT_PARSE_ERROR 终止。"""
+    """解析失败连续重试达默认上限（2 次）后仍失败，以 MODEL_OUTPUT_PARSE_ERROR 终止。"""
 
     llm = FakeLLM(
         [
             _json_message("这不是 JSON"),
-            _json_message('{"kind": "tool_call"}'),
+            _json_message("仍是坏输出"),
+            _json_message("第三次坏输出"),
         ]
     )
     registry = _default_registry()
 
-    state = Agent(llm=llm, registry=registry, max_steps=3).run("任务")
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("任务")
 
     assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
     assert state.final_answer is None
-    assert state.steps_used == 2
-    assert len(state.trace) == 2
-    assert llm.call_count == 2
+    assert state.steps_used == 3
+    assert len(state.trace) == 3
+    assert llm.call_count == 3
 
-    first, second = state.trace
+    first, second, third = state.trace
     assert first.error is not None
     assert first.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
     assert first.error.retryable is True
     assert second.error is not None
     assert second.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
-    assert second.error.retryable is False
-    assert second.decision is None
-    assert second.observation is None
-    # 重试仍失败后直接终止，没有第三次模型调用
+    assert second.error.retryable is True
+    assert third.error is not None
+    assert third.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
+    assert third.error.retryable is False
+    assert third.decision is None
+    assert third.observation is None
+    # 连续失败达上限后直接终止，没有第四次模型调用
     assert state.messages[-1].role is MessageRole.ASSISTANT
 
 
@@ -502,34 +506,6 @@ def test_parse_error_feedback_message_is_stable_and_does_not_leak_raw_output() -
     assert "123" not in feedback.content
     assert "ValidationError" not in feedback.content
     assert "Traceback" not in feedback.content
-
-
-def test_parse_error_retry_is_at_most_once_per_run() -> None:
-    """一次运行内至多重试一次：重试成功后再次解析失败不再获得重试机会。"""
-
-    llm = FakeLLM(
-        [
-            _json_message("这不是 JSON"),
-            _tool_call_json("call-1", "calculator", {"expression": "2 + 2"}),
-            _json_message("又坏了"),
-        ]
-    )
-    registry = ToolRegistry()
-    registry.register(CalculatorTool())
-
-    state = Agent(llm=llm, registry=registry, max_steps=4).run("计算 2 + 2")
-
-    assert state.termination_reason is TerminationReason.MODEL_OUTPUT_PARSE_ERROR
-    assert state.steps_used == 3
-    assert len(state.trace) == 3
-    assert llm.call_count == 3
-
-    second_error = state.trace[2]
-    assert second_error.error is not None
-    assert second_error.error.code is TraceErrorCode.MODEL_OUTPUT_PARSE_ERROR
-    assert second_error.error.retryable is False
-    # 第二次解析失败没有触发又一次重试：消息末尾是失败的那条 assistant 消息
-    assert state.messages[-1].role is MessageRole.ASSISTANT
 
 
 def test_unknown_tool_becomes_observation_then_final_answer() -> None:
