@@ -67,12 +67,15 @@ def response_message(
     content: str | None = "回答",
     role: str = "assistant",
     tool_calls: list[dict[str, object]] | None = None,
+    reasoning_content: str | None = None,
 ) -> dict[str, object]:
     """构造同时兼容 SDK 对象和字典响应的测试数据。"""
 
     message: dict[str, object] = {"role": role, "content": content}
     if tool_calls is not None:
         message["tool_calls"] = tool_calls
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
     return {"choices": [{"message": message}]}
 
 
@@ -107,7 +110,7 @@ def test_deepseek_serializes_message_history_and_returns_normal_response() -> No
     assert request["model"] == DEFAULT_MODEL
     assert request["stream"] is False
     assert request["tools"] is None
-    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert request["extra_body"] == {"thinking": {"type": "enabled"}}
     assert request["messages"] == [
         {"role": "system", "content": "你是计算器"},
         {"role": "user", "content": "计算 2 + 2"},
@@ -159,8 +162,58 @@ def test_deepseek_deserializes_tool_call_response_without_executing_it() -> None
     assert result.tool_calls[0].arguments == {"expression": "6 * 7"}
 
 
-def test_deepseek_serializes_tool_definitions_and_thinking_disabled() -> None:
-    """传入工具清单时，请求应包含 function 定义与思考模式禁用配置。"""
+def test_deepseek_deserializes_reasoning_content_into_message() -> None:
+    """思考模式响应中的 reasoning_content 写回 Message，供下一轮原样带回。"""
+
+    client = RecordingClient(
+        response=response_message(
+            content="4",
+            reasoning_content="先计算表达式，再返回结果。",
+        )
+    )
+
+    result = DeepSeekLLM(client=client).complete(
+        [Message(role=MessageRole.USER, content="计算 2 + 2")]
+    )
+
+    assert result.reasoning_content == "先计算表达式，再返回结果。"
+
+
+def test_deepseek_serializes_reasoning_content_back_on_assistant_message() -> None:
+    """助手消息带 reasoning_content 时，请求原样回传该字段。"""
+
+    client = RecordingClient(response=response_message(content="4"))
+    llm = DeepSeekLLM(client=client)
+
+    llm.complete(
+        [
+            Message(role=MessageRole.USER, content="计算 2 + 2"),
+            Message(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="call-1",
+                        name="calculator",
+                        arguments={"expression": "2 + 2"},
+                    )
+                ],
+                reasoning_content="先算，再答。",
+            ),
+            Message(
+                role=MessageRole.TOOL,
+                content="4",
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+
+    assistant_payload = client.calls[0]["messages"][1]
+    assert assistant_payload["reasoning_content"] == "先算，再答。"
+
+
+def test_deepseek_serializes_tool_definitions_and_thinking_enabled() -> None:
+    """传入工具清单时，请求应包含 function 定义与思考模式启用配置。"""
 
     class SampleTool:
         name = "calculator"
@@ -186,18 +239,18 @@ def test_deepseek_serializes_tool_definitions_and_thinking_disabled() -> None:
             },
         }
     ]
-    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert request["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
-def test_deepseek_thinking_can_be_enabled_explicitly() -> None:
-    """``thinking_disabled=False`` 时请求不携带禁用配置。"""
+def test_deepseek_thinking_can_be_disabled_explicitly() -> None:
+    """``thinking_enabled=False`` 时请求携带禁用思考配置。"""
 
     client = RecordingClient(response=response_message(content="4"))
-    llm = DeepSeekLLM(client=client, thinking_disabled=False)
+    llm = DeepSeekLLM(client=client, thinking_enabled=False)
 
     llm.complete([Message(role=MessageRole.USER, content="测试")])
 
-    assert client.calls[0]["extra_body"] == {}
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 @pytest.mark.parametrize(
@@ -411,7 +464,7 @@ def test_deepseek_complete_stream_requests_stream_and_assembles_content() -> Non
     assert len(client.calls) == 1
     request = client.calls[0]
     assert request["stream"] is True
-    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert request["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "".join(chunk.content for chunk in chunks) == "你好"
     assert collect_stream(chunks) == Message(role=MessageRole.ASSISTANT, content="你好")
 
@@ -565,13 +618,13 @@ def test_deepseek_complete_stream_non_final_tool_has_no_final_content() -> None:
     assert collect_stream(chunks).tool_calls[0].name == "calculator"
 
 
-def test_deepseek_complete_stream_ignores_reasoning_content_delta() -> None:
-    """思考模式增量（reasoning_content）被忽略而不崩溃，与 complete 路径一致。"""
+def test_deepseek_complete_stream_accumulates_reasoning_content_delta() -> None:
+    """思考模式增量（reasoning_content）跨块累积并写回 Message，与非流式一致。"""
 
     client = RecordingClient(
         response=[
-            _stream_delta_chunk(reasoning_content="正在思考", content="答"),
-            _stream_delta_chunk(content="案"),
+            _stream_delta_chunk(reasoning_content="正在", content="答"),
+            _stream_delta_chunk(reasoning_content="思考", content="案"),
         ]
     )
 
@@ -581,7 +634,11 @@ def test_deepseek_complete_stream_ignores_reasoning_content_delta() -> None:
         )
     )
 
-    assert message == Message(role=MessageRole.ASSISTANT, content="答案")
+    assert message == Message(
+        role=MessageRole.ASSISTANT,
+        content="答案",
+        reasoning_content="正在思考",
+    )
 
 
 def test_deepseek_complete_stream_maps_create_error_to_stable_code() -> None:

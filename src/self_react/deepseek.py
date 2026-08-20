@@ -35,13 +35,13 @@ from self_react.openai_compat import (
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TIMEOUT = 30.0
-DEFAULT_THINKING_DISABLED = True
-"""默认禁用 DeepSeek 思考模式。
+DEFAULT_THINKING_ENABLED = True
+"""默认启用 DeepSeek 思考模式。
 
-思考模式会在响应里返回 ``reasoning_content``，DeepSeek 要求后续请求原样
-传回它；本项目按 Day 10 契约只保留模型输出的 JSON 决策，无法保证
-``reasoning_content`` 的完整往返，因此默认关闭思考模式，避免多轮工具调用
-被 API 拒绝。
+思考模式会在响应里返回 ``reasoning_content``，适配器把它写回领域
+``Message.reasoning_content`` 并在下一轮消息中原样带回，从而在多轮工具
+调用中保持思考过程完整往返。无需思考（例如追求更快响应）时传
+``thinking_enabled=False`` 关闭。
 """
 
 
@@ -59,7 +59,7 @@ class DeepSeekLLM:
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
-        thinking_disabled: bool = DEFAULT_THINKING_DISABLED,
+        thinking_enabled: bool = DEFAULT_THINKING_ENABLED,
         client: Client | None = None,
     ) -> None:
         """校验配置并建立客户端；不会把密钥写入领域状态或日志。"""
@@ -78,7 +78,7 @@ class DeepSeekLLM:
         self.model = model
         self.base_url = base_url
         self.timeout = float(timeout)
-        self.thinking_disabled = bool(thinking_disabled)
+        self.thinking_enabled = bool(thinking_enabled)
 
         if client is not None:
             self._client = client
@@ -104,9 +104,9 @@ class DeepSeekLLM:
 
         payload = serialize_messages(messages)
         serialized_tools = serialize_tools(tools) if tools is not None else None
-        extra_body: dict[str, Any] = {}
-        if self.thinking_disabled:
-            extra_body["thinking"] = {"type": "disabled"}
+        extra_body: dict[str, Any] = {
+            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}
+        }
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -127,17 +127,17 @@ class DeepSeekLLM:
         tools: Sequence[object] | None = None,
     ) -> Iterator[StreamChunk]:
         """发起一次流式请求，逐块产出内容增量；组装后与 ``complete`` 等价。
-        流式块里的 ``reasoning_content``（思考模式）按非流式路径约定忽略；
-        工具调用参数跨块按 index 增量拼接，``final_answer`` 工具的
-        ``content`` 增量实时经 ``StreamChunk.final_answer_content`` 透出，
-        末尾块仍一次性携带完整工具调用。
+        流式块里的 ``reasoning_content``（思考模式）跨块增量累积并写回
+        ``Message.reasoning_content``，与非流式路径保持一致；工具调用参数跨块
+        按 index 增量拼接，``final_answer`` 工具的 ``content`` 增量实时经
+        ``StreamChunk.final_answer_content`` 透出，末尾块仍一次性携带完整工具调用。
         """
 
         payload = serialize_messages(messages)
         serialized_tools = serialize_tools(tools) if tools is not None else None
-        extra_body: dict[str, Any] = {}
-        if self.thinking_disabled:
-            extra_body["thinking"] = {"type": "disabled"}
+        extra_body: dict[str, Any] = {
+            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}
+        }
         try:
             stream = self._client.chat.completions.create(
                 model=self.model,
@@ -159,10 +159,11 @@ class DeepSeekLLM:
                 if delta.content or delta.final_answer_content:
                     yield delta
             message = accumulator.message()
-            if message.tool_calls:
+            if message.tool_calls or message.reasoning_content:
                 yield StreamChunk(
                     content="",
                     tool_calls=tuple(message.tool_calls),
+                    reasoning_content=message.reasoning_content or "",
                 )
         except LLMResponseError:
             raise

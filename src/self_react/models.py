@@ -272,8 +272,10 @@ class Message(BaseModel):
     """进入模型上下文的一条消息。
 
     普通消息使用 ``content``；助手消息还可以携带一个或多个
-    ``ToolCall``；工具消息必须通过 ``tool_call_id`` 回指对应调用。这样
-    ``Message`` 表示对话上下文，而 ``ToolCall`` 仍表示需要执行的动作。
+    ``ToolCall``，以及可选的 ``reasoning_content``（DeepSeek 思考模式的
+    推理过程，需在下一轮中原样回传）；工具消息必须通过 ``tool_call_id``
+    回指对应调用。这样 ``Message`` 表示对话上下文，而 ``ToolCall`` 仍表示
+    需要执行的动作。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -282,6 +284,7 @@ class Message(BaseModel):
     content: Annotated[str, Field(strict=True)]
     tool_call_id: Identifier | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    reasoning_content: Annotated[str | None, Field(strict=True)] = None
 
     @field_validator("tool_call_id")
     @classmethod
@@ -293,6 +296,12 @@ class Message(BaseModel):
     @model_validator(mode="after")
     def validate_role_payload(self) -> Message:
         """校验角色与调用关联是否一致。"""
+
+        if (
+            self.reasoning_content is not None
+            and self.role is not MessageRole.ASSISTANT
+        ):
+            raise ValueError("reasoning_content 只能出现在 assistant 消息中")
 
         if self.role in (MessageRole.SYSTEM, MessageRole.USER):
             if not self.content.strip():
