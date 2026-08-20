@@ -32,7 +32,7 @@ def test_scenario_registry_contains_expected_tools() -> None:
 
 
 def test_scenario_extra_instructions_cover_three_failure_modes() -> None:
-    """场景指引必须覆盖 R-09 真实验收的三个失败模式（day-28 §5）。"""
+    """场景指引必须覆盖 R-09 真实验收的三个失败模式与 Issue #90 收口清单。"""
 
     assert isinstance(SCENARIO_EXTRA_INSTRUCTIONS, str)
     # 失败模式一：猜测不存在的文件名 -> 固定三个数据文件；
@@ -44,9 +44,13 @@ def test_scenario_extra_instructions_cover_three_failure_modes() -> None:
     assert "error_code" in SCENARIO_EXTRA_INSTRUCTIONS
     assert "keyword" in SCENARIO_EXTRA_INSTRUCTIONS
     assert "只匹配 message" in SCENARIO_EXTRA_INSTRUCTIONS
-    # 失败模式三：证据足够仍深挖 -> 立即输出 final_answer 止损。
+    # 失败模式三：证据足够仍深挖 -> 明确收口清单，集齐四项即 final_answer 止损。
     assert "final_answer" in SCENARIO_EXTRA_INSTRUCTIONS
-    assert "证据足以回答时立即输出" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "按小时时间分布" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "按 service/路径分布" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "404 明细样本" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "发布记录" in SCENARIO_EXTRA_INSTRUCTIONS
+    assert "禁止再发起任何查询" in SCENARIO_EXTRA_INSTRUCTIONS
 
 
 def test_scenario_examples_render_scenario_guidance_in_system_message() -> None:

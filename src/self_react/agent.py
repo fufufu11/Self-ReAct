@@ -20,11 +20,15 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 特化阶段仍保持至多一次的有界重试。重复动作（复用
 ``call_id`` 或同一工具连续使用相同参数）在分派前被拦截，作为带
 ``REPEATED_ACTION`` 错误码且可重试的失败观察回写，让模型在预算内换一种方式
-继续。
+继续。查询/检索类工具（log_query / retrieve / runbook_search）的护栏区分
+「有效」与「无效」：0 命中、参数与最近一次查询完全相同的查询被拦下并回写
+``REPEATED_QUERY`` 收尾引导；有效查询累计达到阈值（默认 3）时分派前兜底
+拦截；``file_reader`` 读发布记录不打断，其余非查询工具清零。
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterator, Sequence
 
@@ -68,24 +72,47 @@ _REFLECTION_INSTRUCTION = (
 """reflection 模式（R-06）反思阶段的稳定指令消息。"""
 
 _QUERY_TOOL_NAMES = frozenset({"log_query", "retrieve", "runbook_search"})
-"""查询/检索类工具名单（roadmap 10.9）：连调阈值护栏的作用对象。
+"""查询/检索类工具名单（roadmap 10.9；Issue #90 升级为「数有效次数」）。
 
 这三类工具只"读"不"写"，反复调用不会带来新信息；把它们之外的确定性
 工具（calculator、file_reader）排除在外，避免把正常的计算/读取步骤误判为
 查询循环。
 """
 
+_EVIDENCE_READER_TOOL_NAMES = frozenset({"file_reader"})
+"""证据读取工具名单（Issue #90）：读取发布记录等证据的工具。
+
+``file_reader`` 在日志排查场景里读的是 ``deploys.ndjson`` 发布记录，属于
+证据收集的一部分，因此既不占用查询配额、也不打断有效查询计数与「最近一次
+查询」记忆；``calculator`` 等真正的非查询工具才会清零。
+"""
+
 _REPEATED_QUERY_LIMIT_DEFAULT = 3
-"""查询类工具连调触发收尾引导的默认阈值。"""
+"""查询类工具有效查询触发收尾引导的默认阈值。"""
 
 _PARSE_RETRY_LIMIT_DEFAULT = 2
 """主循环文本 JSON 解析失败每个失败序列的重试次数默认上限。"""
 
-_REPEATED_QUERY_MESSAGE = (
-    "连续查询次数已达上限：{} 及其同类查询不会带来新信息，"
+_QUERY_ZERO_HIT_PATTERN = re.compile(r"^(?:匹配|命中) 0 条")
+"""识别查询类工具「0 命中」输出的稳定前缀（log_query / runbook_search）。"""
+
+_REPEATED_QUERY_LIMIT_MESSAGE = (
+    "有效查询次数已达上限：{} 及其同类查询不会带来新信息，"
     "请基于现有证据直接输出 final_answer，不要再发起新的查询。"
 )
-"""查询类工具连调达到阈值时回写的稳定收尾引导消息。"""
+"""有效查询累计达到阈值时回写的稳定收尾引导消息。"""
+
+_REPEATED_QUERY_ARGS_MESSAGE = (
+    "查询 {} 的参数与上一次查询完全相同，不会带来新信息，"
+    "请基于现有证据直接输出 final_answer，不要重复相同查询。"
+)
+"""查询参数与最近一次查询完全相同时回写的稳定收尾引导消息。"""
+
+_QUERY_ZERO_HIT_MESSAGE = (
+    "查询 {} 命中 0 条，没有带来新信息，"
+    "请基于现有证据直接输出 final_answer，不要再发起无结果的查询。"
+)
+"""查询命中 0 条时回写的稳定收尾引导消息。"""
 
 
 def _summarize_input(state: AgentState) -> str:
@@ -135,6 +162,17 @@ def _repeated_action_reason(decision: ToolCall, state: AgentState) -> str | None
             f"如需再次调用请更换参数或使用新编号"
         )
     return None
+
+
+def _is_zero_hit(content: str) -> bool:
+    """判断查询类工具的成功输出是否表示「0 命中」。
+
+    ``log_query`` 的首行是 ``匹配 N 条 / 共 M 条``，``runbook_search`` 的无
+    命中输出以 ``命中 0 条：`` 开头。二者都以「匹配/命中 0 条」开头，因此
+    用稳定的前缀判断，避免为每个查询工具引入结构化命中数。
+    """
+
+    return _QUERY_ZERO_HIT_PATTERN.match(content) is not None
 
 
 def _termination_reason_for(result: ToolResult) -> TerminationReason:
@@ -319,7 +357,8 @@ class Agent:
             )
 
         parse_retry_count = 0
-        consecutive_queries = 0
+        effective_query_count = 0
+        last_query_arguments: dict[str, object] | None = None
         while not state.is_terminated:
             if state.steps_used >= state.max_steps:
                 state = self._rebuild_state(
@@ -505,12 +544,11 @@ class Agent:
                 )
                 break
 
-            # 更新查询/检索类工具的连续计数：只读查询反复调用不带来新信息，
-            # 非查询工具（calculator/file_reader）会打断连续段。
-            if decision.name in _QUERY_TOOL_NAMES:
-                consecutive_queries += 1
-            else:
-                consecutive_queries = 0
+            # Issue #90：查询护栏从「连续计数」升级为「数有效次数」。0 命中、
+            # 参数与最近一次查询相同的查询被拦下并回写 REPEATED_QUERY 收尾引导；
+            # 有效查询累计达到阈值时分派前兜底拦截；file_reader 读发布记录不
+            # 打断，其余非查询工具清零。
+            is_query = decision.name in _QUERY_TOOL_NAMES
 
             repeated_message = _repeated_action_reason(decision, state)
             if repeated_message is not None:
@@ -522,19 +560,55 @@ class Agent:
                     retryable=True,
                 )
             elif (
-                self._repeated_query_limit > 0
-                and decision.name in _QUERY_TOOL_NAMES
-                and consecutive_queries >= self._repeated_query_limit
+                is_query
+                and last_query_arguments is not None
+                and decision.arguments == last_query_arguments
             ):
                 result = ToolResult.failure(
                     tool_call_id=decision.call_id,
                     tool_name=decision.name,
                     code=ToolErrorCode.REPEATED_QUERY,
-                    message=_REPEATED_QUERY_MESSAGE.format(decision.name),
+                    message=_REPEATED_QUERY_ARGS_MESSAGE.format(decision.name),
+                    retryable=True,
+                )
+            elif (
+                is_query
+                and self._repeated_query_limit > 0
+                and effective_query_count >= self._repeated_query_limit - 1
+            ):
+                result = ToolResult.failure(
+                    tool_call_id=decision.call_id,
+                    tool_name=decision.name,
+                    code=ToolErrorCode.REPEATED_QUERY,
+                    message=_REPEATED_QUERY_LIMIT_MESSAGE.format(decision.name),
                     retryable=True,
                 )
             else:
                 result = self._registry.execute(decision)
+                if (
+                    is_query
+                    and result.is_success
+                    and result.content is not None
+                    and _is_zero_hit(result.content)
+                ):
+                    result = ToolResult.failure(
+                        tool_call_id=decision.call_id,
+                        tool_name=decision.name,
+                        code=ToolErrorCode.REPEATED_QUERY,
+                        message=_QUERY_ZERO_HIT_MESSAGE.format(decision.name),
+                        retryable=True,
+                    )
+
+            # 更新护栏状态：查询类工具始终记录「最近一次查询」参数，仅在成功
+            # （有效）时累加；file_reader 保留现状不打断；其余非查询工具清零。
+            if is_query:
+                last_query_arguments = decision.arguments
+                if result.is_success:
+                    effective_query_count += 1
+            elif decision.name not in _EVIDENCE_READER_TOOL_NAMES:
+                effective_query_count = 0
+                last_query_arguments = None
+
             observation = Observation.from_tool_result(result)
             messages.append(observation.as_message())
             step = TraceStep(
