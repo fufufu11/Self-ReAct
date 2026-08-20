@@ -34,8 +34,10 @@ SCENARIO_EXTRA_INSTRUCTIONS = (
     "不是站点名，不要用 promjet 作为 service 过滤值。\n"
     "4. 读取日志内容用 log_query 过滤/聚合，不要用 file_reader "
     "直接读 logs.ndjson 全文。\n"
-    "5. 证据足以回答时立即输出 final_answer，不要继续额外查询；"
-    "重复相同的过滤/聚合不会带来新信息。"
+    "5. 判断「外部扫描」还是「应用故障」需要且只需要集齐四项证据："
+    "①按小时时间分布 ②按 service/路径分布 ③几条 404 明细样本 "
+    "④发布记录（deploys.ndjson）对比；四项集齐后立即输出 final_answer，"
+    "禁止再发起任何查询。"
 )
 """注入系统提示词的场景指引（R-09 真实验收后补：见 day-28 §5）。
 

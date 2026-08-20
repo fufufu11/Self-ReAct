@@ -1,11 +1,13 @@
-"""roadmap 10.9：查询类工具连调阈值强制收尾的公开行为测试。
+"""查询类工具护栏的公开行为测试（roadmap 10.9 起步，Issue #90 升级为「数有效次数」）。
 
 测试只依赖 Fake LLM 与确定性工具，不访问网络、不调用真实 API。公开缝是
-``Agent.run(task) -> AgentState``：断言连续查询/检索类工具（log_query /
-retrieve / runbook_search）调用累计达到阈值（默认 3）时，该次调用在分派前
-被拦截、作为 ``REPEATED_QUERY`` 失败观察回写，引导模型基于现有证据直接
-final_answer；被非查询工具打断时计数清零；``repeated_query_limit`` 置 0 时
-关闭该护栏。
+``Agent.run(task) -> AgentState``：查询/检索类工具（log_query / retrieve /
+runbook_search）的护栏区分「有效」与「无效」——0 命中、参数与最近一次查询
+完全相同的查询在分派前/执行后被拦下，作为 ``REPEATED_QUERY`` 失败观察回写
+并引导模型直接 final_answer；有效查询累计达到阈值（默认 3）时在分派前兜底
+拦截；``file_reader`` 读发布记录不打断有效查询计数与「最近一次查询」记忆，
+``calculator`` 等非查询工具仍会清零；``repeated_query_limit`` 置 0 时关闭
+该护栏。
 """
 
 from __future__ import annotations
@@ -217,5 +219,87 @@ def test_mixed_query_tools_accumulate_together() -> None:
 
     assert state.termination_reason is TerminationReason.FINAL_ANSWER
     intercepted = state.trace[2].observation
+    assert intercepted is not None
+    assert intercepted.error_code is ToolErrorCode.REPEATED_QUERY
+
+
+class _FakeFileReader:
+    """name 为 ``file_reader`` 的最小只读工具，测护栏按名字区分证据读取。"""
+
+    name = "file_reader"
+    description = "读取发布记录等证据文件"
+
+    def execute(self, arguments: dict[str, object]) -> str:
+        return "（发布记录内容）"
+
+
+def test_zero_hit_query_is_intercepted() -> None:
+    """命中 0 条的查询被拦下，回写 REPEATED_QUERY 收尾引导，不当作有效步骤。"""
+
+    registry = ToolRegistry()
+    registry.register(RunbookSearchTool(entries=[_runbook_entry()]))
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "runbook_search", {"query": "xyzzy 不存在的主题"}),
+            _final_answer_json("0 命中，无法定位，基于现有证据给出结论。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=2).run("检索无结果")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    intercepted = state.trace[0].observation
+    assert intercepted is not None
+    assert intercepted.is_error is True
+    assert intercepted.error_code is ToolErrorCode.REPEATED_QUERY
+    assert intercepted.retryable is True
+    assert "final_answer" in intercepted.content
+
+
+def test_repeated_query_arguments_across_file_reader_is_intercepted() -> None:
+    """跨 file_reader 的相同参数查询仍被判为无效，回写 REPEATED_QUERY。"""
+
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+    registry.register(_FakeFileReader())
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "retrieve", {"query": "react"}),
+            _tool_call_json("f1", "file_reader", {"path": "deploys.ndjson"}),
+            _tool_call_json("q2", "retrieve", {"query": "react"}),
+            _final_answer_json("重复查询，直接回答。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("检索")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    intercepted = state.trace[2].observation
+    assert intercepted is not None
+    assert intercepted.error_code is ToolErrorCode.REPEATED_QUERY
+    assert "final_answer" in intercepted.content
+
+
+def test_file_reader_does_not_break_effective_query_count() -> None:
+    """file_reader 不打断有效查询计数，跨它仍累计到阈值并兜底拦截。"""
+
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+    registry.register(_FakeFileReader())
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "retrieve", {"query": "python"}),
+            _tool_call_json("f1", "file_reader", {"path": "deploys.ndjson"}),
+            _tool_call_json("q2", "retrieve", {"query": "react"}),
+            _tool_call_json("q3", "retrieve", {"query": "deepseek"}),
+            _final_answer_json("完成。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=5).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    # q1、q2 两次有效查询后，q3 是第 3 次有效查询，分派前被拦
+    intercepted = state.trace[3].observation
     assert intercepted is not None
     assert intercepted.error_code is ToolErrorCode.REPEATED_QUERY
