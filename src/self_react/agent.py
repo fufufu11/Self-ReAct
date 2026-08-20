@@ -64,6 +64,23 @@ _REFLECTION_INSTRUCTION = (
 )
 """reflection 模式（R-06）反思阶段的稳定指令消息。"""
 
+_QUERY_TOOL_NAMES = frozenset({"log_query", "retrieve", "runbook_search"})
+"""查询/检索类工具名单（roadmap 10.9）：连调阈值护栏的作用对象。
+
+这三类工具只"读"不"写"，反复调用不会带来新信息；把它们之外的确定性
+工具（calculator、file_reader）排除在外，避免把正常的计算/读取步骤误判为
+查询循环。
+"""
+
+_REPEATED_QUERY_LIMIT_DEFAULT = 3
+"""查询类工具连调触发收尾引导的默认阈值。"""
+
+_REPEATED_QUERY_MESSAGE = (
+    "连续查询次数已达上限：{} 及其同类查询不会带来新信息，"
+    "请基于现有证据直接输出 final_answer，不要再发起新的查询。"
+)
+"""查询类工具连调达到阈值时回写的稳定收尾引导消息。"""
+
 
 def _summarize_input(state: AgentState) -> str:
     """生成一轮模型输入的摘要。
@@ -176,8 +193,9 @@ class Agent:
         *,
         max_steps: int,
         context_policy: ContextPolicy | None = None,
+        repeated_query_limit: int = _REPEATED_QUERY_LIMIT_DEFAULT,
     ) -> None:
-        """校验并保存循环依赖、步数预算与可选的上下文策略。"""
+        """校验并保存循环依赖、步数预算、上下文策略与查询连调阈值。"""
 
         if not isinstance(llm, LLM):
             raise TypeError("llm 必须满足 LLM 协议")
@@ -189,11 +207,18 @@ class Agent:
             raise ValueError("max_steps 必须是非负整数")
         if context_policy is not None and not isinstance(context_policy, ContextPolicy):
             raise TypeError("context_policy 必须是 ContextPolicy")
+        if isinstance(repeated_query_limit, bool) or not isinstance(
+            repeated_query_limit, int
+        ):
+            raise ValueError("repeated_query_limit 必须是非负整数")
+        if repeated_query_limit < 0:
+            raise ValueError("repeated_query_limit 必须是非负整数")
 
         self._llm = llm
         self._registry = registry
         self._max_steps = max_steps
         self._context_policy = context_policy
+        self._repeated_query_limit = repeated_query_limit
 
     def run(
         self,
@@ -280,6 +305,7 @@ class Agent:
             )
 
         parse_retried = False
+        consecutive_queries = 0
         while not state.is_terminated:
             if state.steps_used >= state.max_steps:
                 state = self._rebuild_state(
@@ -458,6 +484,13 @@ class Agent:
                 )
                 break
 
+            # 更新查询/检索类工具的连续计数：只读查询反复调用不带来新信息，
+            # 非查询工具（calculator/file_reader）会打断连续段。
+            if decision.name in _QUERY_TOOL_NAMES:
+                consecutive_queries += 1
+            else:
+                consecutive_queries = 0
+
             repeated_message = _repeated_action_reason(decision, state)
             if repeated_message is not None:
                 result = ToolResult.failure(
@@ -465,6 +498,18 @@ class Agent:
                     tool_name=decision.name,
                     code=ToolErrorCode.REPEATED_ACTION,
                     message=repeated_message,
+                    retryable=True,
+                )
+            elif (
+                self._repeated_query_limit > 0
+                and decision.name in _QUERY_TOOL_NAMES
+                and consecutive_queries >= self._repeated_query_limit
+            ):
+                result = ToolResult.failure(
+                    tool_call_id=decision.call_id,
+                    tool_name=decision.name,
+                    code=ToolErrorCode.REPEATED_QUERY,
+                    message=_REPEATED_QUERY_MESSAGE.format(decision.name),
                     retryable=True,
                 )
             else:
