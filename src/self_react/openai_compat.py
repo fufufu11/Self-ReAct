@@ -106,23 +106,26 @@ def serialize_message(message: Message) -> dict[str, Any]:
         "content": message.content,
     }
 
-    if message.role is MessageRole.ASSISTANT and message.tool_calls:
-        payload["tool_calls"] = [
-            {
-                "id": call.call_id,
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": json.dumps(
-                        call.arguments,
-                        ensure_ascii=False,
-                        allow_nan=False,
-                        separators=(",", ":"),
-                    ),
-                },
-            }
-            for call in message.tool_calls
-        ]
+    if message.role is MessageRole.ASSISTANT:
+        if message.tool_calls:
+            payload["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(
+                            call.arguments,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        if message.reasoning_content:
+            payload["reasoning_content"] = message.reasoning_content
     elif message.role is MessageRole.TOOL:
         if message.tool_call_id is None:
             raise LLMInputError("tool 消息缺少 tool_call_id")
@@ -261,6 +264,14 @@ def deserialize_response(response: Any) -> Message:
     if not isinstance(content, str):
         raise LLMResponseError("供应商响应 message.content 必须是字符串或 null")
 
+    reasoning_content = _field(raw_message, "reasoning_content", None)
+    if reasoning_content is not None and not isinstance(reasoning_content, str):
+        raise LLMResponseError(
+            "供应商响应 message.reasoning_content 必须是字符串或 null"
+        )
+    if reasoning_content == "":
+        reasoning_content = None
+
     raw_tool_calls = _field(raw_message, "tool_calls", None)
     if raw_tool_calls is None:
         raw_tool_calls = []
@@ -274,6 +285,7 @@ def deserialize_response(response: Any) -> Message:
             role=MessageRole.ASSISTANT,
             content=content,
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
     except Exception as exc:
         raise LLMResponseError("供应商响应无法构造为 assistant Message") from exc
@@ -379,7 +391,8 @@ class StreamAccumulator:
     消费一个 OpenAI 兼容的流式块并返回本块的内容增量；``message`` 在
     全部块消费完毕后返回与 ``complete`` 路径 ``deserialize_response``
     等价的 assistant Message。``reasoning_content``（DeepSeek 思考模式）
-    按 ``complete`` 路径约定忽略，不进入领域 Message。
+    跨块增量累积，最终写回领域 Message 的 ``reasoning_content``，与
+    ``complete`` 路径保持一致。
 
     ``final_answer`` 工具的 ``content`` 参数值会随块增量实时提取：``feed``
     返回的 ``StreamChunk.final_answer_content`` 携带自上次以来新增的纯文本
@@ -392,6 +405,7 @@ class StreamAccumulator:
         """初始化空的内容片段与工具调用累积槽。"""
 
         self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
         self._tool_call_parts: dict[int, dict[str, str]] = {}
         self._final_arguments = ""
         self._final_content_emitted = 0
@@ -416,6 +430,14 @@ class StreamAccumulator:
         if not isinstance(content, str):
             raise LLMResponseError("流式响应 delta.content 必须是字符串或 null")
         self._content_parts.append(content)
+
+        reasoning = _field(raw_delta, "reasoning_content", None)
+        if reasoning is not None:
+            if not isinstance(reasoning, str):
+                raise LLMResponseError(
+                    "流式响应 delta.reasoning_content 必须是字符串或 null"
+                )
+            self._reasoning_parts.append(reasoning)
 
         raw_tool_calls = _field(raw_delta, "tool_calls", None)
         if raw_tool_calls is not None:
@@ -498,10 +520,12 @@ class StreamAccumulator:
             }
             calls.append(_deserialize_tool_call(raw_call))
         try:
+            reasoning_content = "".join(self._reasoning_parts) or None
             return Message(
                 role=MessageRole.ASSISTANT,
                 content="".join(self._content_parts),
                 tool_calls=calls,
+                reasoning_content=reasoning_content,
             )
         except Exception as exc:
             raise LLMResponseError("流式增量无法组装为 assistant Message") from exc

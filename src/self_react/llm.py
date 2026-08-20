@@ -98,7 +98,9 @@ class StreamChunk:
     是本块携带的原生 ``final_answer`` 工具调用 ``content`` 参数增量——已从
     跨块累积的 arguments JSON 片段中提取出的纯文本，仅供流式渲染实时展示，
     不参与 :func:`collect_stream` 的消息组装；``tool_calls`` 是到当前块为止
-    已完成组装的工具调用，通常只在最后一个块出现。调用方可以消费
+    已完成组装的工具调用，通常只在最后一个块出现；``reasoning_content``
+    （DeepSeek 思考模式）通常只在最后一个块完整携带，由
+    :func:`collect_stream` 组装进最终 Message。调用方可以消费
     ``content`` / ``final_answer_content`` 做实时展示，最终用
     :func:`collect_stream` 组装出与 ``complete`` 等价的 assistant Message。
     """
@@ -106,6 +108,7 @@ class StreamChunk:
     content: str
     final_answer_content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
+    reasoning_content: str = ""
 
     def __post_init__(self) -> None:
         """拒绝非字符串内容与非 ToolCall 元素，避免组装阶段才暴露类型错误。"""
@@ -114,6 +117,8 @@ class StreamChunk:
             raise TypeError("StreamChunk.content 必须是字符串")
         if not isinstance(self.final_answer_content, str):
             raise TypeError("StreamChunk.final_answer_content 必须是字符串")
+        if not isinstance(self.reasoning_content, str):
+            raise TypeError("StreamChunk.reasoning_content 必须是字符串")
         if isinstance(self.tool_calls, (str, bytes)) or not isinstance(
             self.tool_calls, tuple
         ):
@@ -125,23 +130,27 @@ class StreamChunk:
 def collect_stream(chunks: Iterable[StreamChunk]) -> Message:
     """把完整增量序列组装成与 ``complete`` 等价的 assistant Message。
 
-    拼接所有 ``content`` 增量并按出现顺序收集 ``tool_calls``；无法组装出
-    合法 assistant Message（例如重复工具调用编号）时报稳定响应错误。只做
-    纯转换，不访问网络、不读取环境变量、不修改输入。
+    拼接所有 ``content`` 增量并按出现顺序收集 ``tool_calls``，同时把各块
+    ``reasoning_content`` 拼接写回最终消息；无法组装出合法 assistant Message
+    （例如重复工具调用编号）时报稳定响应错误。只做纯转换，不访问网络、
+    不读取环境变量、不修改输入。
     """
 
     content_parts: list[str] = []
     tool_calls: list[ToolCall] = []
+    reasoning_parts: list[str] = []
     for chunk in chunks:
         if not isinstance(chunk, StreamChunk):
             raise LLMResponseError("流式增量序列只能包含 StreamChunk")
         content_parts.append(chunk.content)
         tool_calls.extend(chunk.tool_calls)
+        reasoning_parts.append(chunk.reasoning_content)
     try:
         return Message(
             role=MessageRole.ASSISTANT,
             content="".join(content_parts),
             tool_calls=tool_calls,
+            reasoning_content="".join(reasoning_parts) or None,
         )
     except Exception:
         raise LLMResponseError("流式增量无法组装为 assistant Message") from None

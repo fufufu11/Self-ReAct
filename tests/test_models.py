@@ -59,6 +59,29 @@ def test_message_rejects_wrong_type_and_invalid_tool_association() -> None:
         Message(role=MessageRole.TOOL, content="result")
 
 
+def test_message_reasoning_content_only_allowed_on_assistant() -> None:
+    """reasoning_content 只能出现在 assistant 消息，其它角色会被拒绝。"""
+
+    assistant = Message(
+        role=MessageRole.ASSISTANT,
+        content="",
+        tool_calls=[ToolCall(call_id="call-1", name="calculator", arguments={})],
+        reasoning_content="思考过程",
+    )
+    assert assistant.reasoning_content == "思考过程"
+
+    with pytest.raises(ValidationError):
+        Message(role=MessageRole.USER, content="你好", reasoning_content="不允许")
+
+    with pytest.raises(ValidationError):
+        Message(
+            role=MessageRole.TOOL,
+            content="4",
+            tool_call_id="call-1",
+            reasoning_content="不允许",
+        )
+
+
 def test_tool_call_requires_arguments_and_json_serializable_values() -> None:
     """工具动作必须有参数对象，且参数不能携带运行时对象。"""
 
