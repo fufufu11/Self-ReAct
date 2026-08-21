@@ -30,3 +30,10 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local working assets (evaluation drivers, diagnostics, raw log datasets, drafts)
+# Backed up privately in Self-ReAct-private; never published.
+tmp/
+
+# Obsidian vault configuration
+.obsidian/

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint (ruff check)
+        run: uv run ruff check src tests
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check src tests
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Smoke check (CLI entry and deterministic examples)
+        run: |
+          uv run self-react hello
+          uv run self-react example single-tool
+          uv run self-react example multi-tool
+          uv run self-react example failure-recovery
+          uv run self-react example plan-demo
+          uv run self-react example reflection-demo
+          uv run self-react example log-404-spike
+          uv run self-react example log-error-window
+          uv run self-react example log-release-correlation

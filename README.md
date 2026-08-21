@@ -1,5 +1,10 @@
 # Self-ReAct
 
+[![CI](https://github.com/fufufu11/Self-ReAct/actions/workflows/ci.yml/badge.svg)](https://github.com/fufufu11/Self-ReAct/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fufufu11/Self-ReAct)](https://github.com/fufufu11/Self-ReAct/releases)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 一个最小可用、可测试、可演示的 ReAct（Reason + Act）智能体框架。
 
 Self-ReAct 实现了一个单智能体 ReAct 闭环：模型基于当前状态做决策，
@@ -377,6 +382,7 @@ keyword 拒绝，`log_query` 的 `service` 参数按被查询文件的数据校�
 
 ## 文档导航
 
+- [更新日志](CHANGELOG.md)：各版本的改动记录。
 - [项目计划](docs/project-plan.md)：目标、边界、开发约定与 Issue/PR 索引。
 - [CONTEXT.md](CONTEXT.md)：领域上下文与统一术语。
 - [ReAct 核心循环](docs/architecture/react-loop.md)：论文调研与状态图。
