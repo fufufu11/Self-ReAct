@@ -23,7 +23,11 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 继续。查询/检索类工具（log_query / retrieve / runbook_search）的护栏区分
 「有效」与「无效」：0 命中、参数与最近一次查询完全相同的查询被拦下并回写
 ``REPEATED_QUERY`` 收尾引导；有效查询累计达到阈值（默认 3）时分派前兜底
-拦截；``file_reader`` 读发布记录不打断，其余非查询工具清零。
+拦截；``file_reader`` 读发布记录不打断，其余非查询工具清零。若一次查询被
+``REPEATED_QUERY`` 软拦截后，下一轮模型仍发起查询类工具，则视为「被拦后仍
+连续查询、拒绝收尾」，直接以不可恢复的 ``REPEATED_QUERY`` 终止
+（终止原因 ``REPEATED_QUERY_STOP``），避免步数耗尽；中间插入任何非查询工具
+（含 ``file_reader``）则视为换策略，解除该硬兜底。
 """
 
 from __future__ import annotations
@@ -114,6 +118,12 @@ _QUERY_ZERO_HIT_MESSAGE = (
 )
 """查询命中 0 条时回写的稳定收尾引导消息。"""
 
+_REPEATED_QUERY_STOP_MESSAGE = (
+    "查询 {} 的前一次查询已被拦截并要求收尾，模型仍继续发起查询，"
+    "视为无法收敛，终止本次运行。"
+)
+"""被 REPEATED_QUERY 拦下后下一轮仍发起查询时的硬终止说明。"""
+
 
 def _summarize_input(state: AgentState) -> str:
     """生成一轮模型输入的摘要。
@@ -180,6 +190,8 @@ def _termination_reason_for(result: ToolResult) -> TerminationReason:
 
     if result.error is not None and result.error.code is ToolErrorCode.UNKNOWN_TOOL:
         return TerminationReason.UNKNOWN_TOOL
+    if result.error is not None and result.error.code is ToolErrorCode.REPEATED_QUERY:
+        return TerminationReason.REPEATED_QUERY_STOP
     return TerminationReason.TOOL_EXECUTION_ERROR
 
 
@@ -359,6 +371,7 @@ class Agent:
         parse_retry_count = 0
         effective_query_count = 0
         last_query_arguments: dict[str, object] | None = None
+        pending_repeated_query_stop = False
         while not state.is_terminated:
             if state.steps_used >= state.max_steps:
                 state = self._rebuild_state(
@@ -550,64 +563,86 @@ class Agent:
             # 打断，其余非查询工具清零。
             is_query = decision.name in _QUERY_TOOL_NAMES
 
-            repeated_message = _repeated_action_reason(decision, state)
-            if repeated_message is not None:
-                result = ToolResult.failure(
-                    tool_call_id=decision.call_id,
-                    tool_name=decision.name,
-                    code=ToolErrorCode.REPEATED_ACTION,
-                    message=repeated_message,
-                    retryable=True,
-                )
-            elif (
-                is_query
-                and last_query_arguments is not None
-                and decision.arguments == last_query_arguments
-            ):
+            if is_query and pending_repeated_query_stop:
+                # 硬兜底：上一轮查询已被 REPEATED_QUERY 软拦截要求收尾，本轮仍
+                # 发起查询类工具，直接以不可恢复的 REPEATED_QUERY 终止，杜绝
+                # 「被拦后仍换参数继续查、拒绝 final_answer」导致的步数耗尽。
                 result = ToolResult.failure(
                     tool_call_id=decision.call_id,
                     tool_name=decision.name,
                     code=ToolErrorCode.REPEATED_QUERY,
-                    message=_REPEATED_QUERY_ARGS_MESSAGE.format(decision.name),
-                    retryable=True,
-                )
-            elif (
-                is_query
-                and self._repeated_query_limit > 0
-                and effective_query_count >= self._repeated_query_limit - 1
-            ):
-                result = ToolResult.failure(
-                    tool_call_id=decision.call_id,
-                    tool_name=decision.name,
-                    code=ToolErrorCode.REPEATED_QUERY,
-                    message=_REPEATED_QUERY_LIMIT_MESSAGE.format(decision.name),
-                    retryable=True,
+                    message=_REPEATED_QUERY_STOP_MESSAGE.format(decision.name),
+                    retryable=False,
                 )
             else:
-                result = self._registry.execute(decision)
-                if (
+                repeated_message = _repeated_action_reason(decision, state)
+                if repeated_message is not None:
+                    result = ToolResult.failure(
+                        tool_call_id=decision.call_id,
+                        tool_name=decision.name,
+                        code=ToolErrorCode.REPEATED_ACTION,
+                        message=repeated_message,
+                        retryable=True,
+                    )
+                elif (
                     is_query
-                    and result.is_success
-                    and result.content is not None
-                    and _is_zero_hit(result.content)
+                    and last_query_arguments is not None
+                    and decision.arguments == last_query_arguments
                 ):
                     result = ToolResult.failure(
                         tool_call_id=decision.call_id,
                         tool_name=decision.name,
                         code=ToolErrorCode.REPEATED_QUERY,
-                        message=_QUERY_ZERO_HIT_MESSAGE.format(decision.name),
+                        message=_REPEATED_QUERY_ARGS_MESSAGE.format(decision.name),
                         retryable=True,
                     )
+                elif (
+                    is_query
+                    and self._repeated_query_limit > 0
+                    and effective_query_count >= self._repeated_query_limit - 1
+                ):
+                    result = ToolResult.failure(
+                        tool_call_id=decision.call_id,
+                        tool_name=decision.name,
+                        code=ToolErrorCode.REPEATED_QUERY,
+                        message=_REPEATED_QUERY_LIMIT_MESSAGE.format(decision.name),
+                        retryable=True,
+                    )
+                else:
+                    result = self._registry.execute(decision)
+                    if (
+                        is_query
+                        and result.is_success
+                        and result.content is not None
+                        and _is_zero_hit(result.content)
+                    ):
+                        result = ToolResult.failure(
+                            tool_call_id=decision.call_id,
+                            tool_name=decision.name,
+                            code=ToolErrorCode.REPEATED_QUERY,
+                            message=_QUERY_ZERO_HIT_MESSAGE.format(decision.name),
+                            retryable=True,
+                        )
 
             # 更新护栏状态：查询类工具始终记录「最近一次查询」参数，仅在成功
             # （有效）时累加；file_reader 保留现状不打断；其余非查询工具清零。
+            # 硬兜底状态位同步：查询被 REPEATED_QUERY 软拦截后置位，任何非查询
+            # 工具（含 file_reader）视为换策略而复位。
             if is_query:
                 last_query_arguments = decision.arguments
                 if result.is_success:
                     effective_query_count += 1
-            elif decision.name not in _EVIDENCE_READER_TOOL_NAMES:
-                effective_query_count = 0
-                last_query_arguments = None
+                    pending_repeated_query_stop = False
+                else:
+                    pending_repeated_query_stop = (
+                        result.error is not None
+                        and result.error.code is ToolErrorCode.REPEATED_QUERY
+                    )
+            else:
+                pending_repeated_query_stop = False
+                if decision.name not in _EVIDENCE_READER_TOOL_NAMES:
+                    effective_query_count = 0
+                    last_query_arguments = None
 
             observation = Observation.from_tool_result(result)
             messages.append(observation.as_message())

@@ -303,3 +303,128 @@ def test_file_reader_does_not_break_effective_query_count() -> None:
     intercepted = state.trace[3].observation
     assert intercepted is not None
     assert intercepted.error_code is ToolErrorCode.REPEATED_QUERY
+
+
+def test_query_after_repeated_query_intercept_is_hard_stopped() -> None:
+    """被 REPEATED_QUERY 软拦截后仍发起查询 → REPEATED_QUERY_STOP 硬终止。"""
+
+    class CountingRetrieve(RetrieveTool):
+        """带调用计数，断言硬终止在分派前拦截、未触达工具层。"""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def execute(self, arguments: dict[str, object]) -> str:
+            self.call_count += 1
+            return super().execute(arguments)
+
+    tool = CountingRetrieve()
+    registry = ToolRegistry()
+    registry.register(tool)
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "retrieve", {"query": "python"}),
+            _tool_call_json("q2", "retrieve", {"query": "react"}),
+            # 第 3 次有效查询：达到阈值，软拦截并回写 REPEATED_QUERY
+            _tool_call_json("q3", "retrieve", {"query": "deepseek"}),
+            # 下一轮仍查询：硬终止
+            _tool_call_json("q4", "retrieve", {"query": "pydantic"}),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=4).run("检索多个主题")
+
+    assert state.termination_reason is TerminationReason.REPEATED_QUERY_STOP
+    # 前两次查询正常执行，第 3 次与第 4 次均在分派前被拦
+    assert tool.call_count == 2
+    soft = state.trace[2].observation
+    assert soft is not None
+    assert soft.error_code is ToolErrorCode.REPEATED_QUERY
+    assert soft.retryable is True
+    hard = state.trace[3].observation
+    assert hard is not None
+    assert hard.error_code is ToolErrorCode.REPEATED_QUERY
+    assert hard.retryable is False
+
+
+def test_query_after_zero_hit_intercept_is_hard_stopped() -> None:
+    """0 命中软拦截后仍发起查询 → REPEATED_QUERY_STOP 硬终止。"""
+
+    registry = ToolRegistry()
+    registry.register(RunbookSearchTool(entries=[_runbook_entry()]))
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "runbook_search", {"query": "xyzzy 不存在的主题"}),
+            _tool_call_json("q2", "runbook_search", {"query": "另一个也不存在"}),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=2).run("检索无结果")
+
+    assert state.termination_reason is TerminationReason.REPEATED_QUERY_STOP
+    soft = state.trace[0].observation
+    assert soft is not None
+    assert soft.error_code is ToolErrorCode.REPEATED_QUERY
+    assert soft.retryable is True
+    hard = state.trace[1].observation
+    assert hard is not None
+    assert hard.error_code is ToolErrorCode.REPEATED_QUERY
+    assert hard.retryable is False
+
+
+def test_non_query_tool_after_intercept_cancels_hard_stop() -> None:
+    """软拦截后插入非查询工具（calculator）视为换策略，解除硬兜底。"""
+
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+    registry.register(CalculatorTool())
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "retrieve", {"query": "python"}),
+            _tool_call_json("q2", "retrieve", {"query": "react"}),
+            # 第 3 次有效查询：软拦截，置硬兜底待决位
+            _tool_call_json("q3", "retrieve", {"query": "deepseek"}),
+            # 换用非查询工具：解除硬兜底并清零计数
+            _tool_call_json("c1", "calculator", {"expression": "1 + 1"}),
+            # 重新计数后的第一次查询，应正常执行
+            _tool_call_json("q4", "retrieve", {"query": "pydantic"}),
+            _final_answer_json("完成。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=6).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    resumed = state.trace[4].observation
+    assert resumed is not None
+    assert resumed.is_error is False
+
+
+def test_file_reader_after_intercept_cancels_hard_stop() -> None:
+    """软拦截后改用 file_reader 读发布记录视为换策略，解除硬兜底。"""
+
+    registry = ToolRegistry()
+    registry.register(RetrieveTool())
+    registry.register(_FakeFileReader())
+    llm = FakeLLM(
+        [
+            _tool_call_json("q1", "retrieve", {"query": "python"}),
+            _tool_call_json("q2", "retrieve", {"query": "react"}),
+            # 第 3 次有效查询：软拦截
+            _tool_call_json("q3", "retrieve", {"query": "deepseek"}),
+            # 换用 file_reader：解除硬兜底
+            _tool_call_json("f1", "file_reader", {"path": "deploys.ndjson"}),
+            # 后续查询不被硬终止（file_reader 不打断计数，仍按阈值软拦）
+            _tool_call_json("q4", "retrieve", {"query": "pydantic"}),
+            _final_answer_json("完成。"),
+        ]
+    )
+
+    state = Agent(llm=llm, registry=registry, max_steps=6).run("综合任务")
+
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    # file_reader 后依旧会按既有护栏判断（软拦截），而不是硬终止
+    after = state.trace[4].observation
+    assert after is not None
+    assert after.error_code is ToolErrorCode.REPEATED_QUERY
+    assert after.retryable is True
