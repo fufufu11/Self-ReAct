@@ -151,8 +151,6 @@ def test_file_reader_content_at_limit_is_not_truncated(tmp_path: Path) -> None:
         "../secret.txt",
         "a/../b.txt",
         "sub/../../secret.txt",
-        "..\\secret.txt",
-        "sub/..\\secret.txt",
         "..",
     ],
 )
@@ -161,6 +159,35 @@ def test_file_reader_rejects_parent_traversal_syntactically(
     path: str,
 ) -> None:
     """包含 .. 组件的路径属于参数问题，返回 INVALID_ARGUMENTS。"""
+
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    registry = _registry_with_reader(tmp_path)
+
+    result = registry.execute(
+        ToolCall(call_id="call-1", name="file_reader", arguments={"path": path})
+    )
+
+    assert result.is_success is False
+    assert result.content is None
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+    assert result.error.retryable is True
+    assert ".." in result.error.message
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "..\\secret.txt",
+        "sub/..\\secret.txt",
+    ],
+)
+@pytest.mark.skipif(os.name != "nt", reason="反斜杠 .. 组件仅在 Windows 是路径分隔符")
+def test_file_reader_rejects_parent_traversal_windows_separator(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    """Windows 反斜杠形式的 .. 越界路径同样返回 INVALID_ARGUMENTS。"""
 
     (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
     registry = _registry_with_reader(tmp_path)
@@ -558,7 +585,11 @@ def test_file_reader_rejects_overlong_path(tmp_path: Path) -> None:
 def test_file_reader_path_at_length_limit_passes_validation(
     tmp_path: Path,
 ) -> None:
-    """路径长度恰好等于上限时通过参数校验，只在执行期报文件不存在。"""
+    """路径长度恰好等于上限时通过参数校验，只在执行期失败。
+
+    Windows 上是干净的"文件不存在"；Linux 上超长文件名触发
+    ENAMETOOLONG，由注册表兜底包装为执行期错误。
+    """
 
     registry = _registry_with_reader(tmp_path)
 
@@ -573,7 +604,8 @@ def test_file_reader_path_at_length_limit_passes_validation(
     assert result.is_success is False
     assert result.error is not None
     assert result.error.code is ToolErrorCode.TOOL_EXECUTION_ERROR
-    assert "文件不存在" in result.error.message
+    if os.name == "nt":
+        assert "文件不存在" in result.error.message
 
 
 def test_file_reader_executes_directly_without_registry(tmp_path: Path) -> None:

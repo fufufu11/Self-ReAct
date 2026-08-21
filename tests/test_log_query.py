@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -166,9 +167,25 @@ def test_log_query_rejects_invalid_arguments(
     assert result.error.retryable is True
 
 
-@pytest.mark.parametrize("path", ["C:/outside.ndjson", "../outside.ndjson"])
+@pytest.mark.parametrize("path", ["../outside.ndjson", "a/../outside.ndjson"])
 def test_log_query_rejects_unsafe_path(path: str, tmp_path: Path) -> None:
-    """绝对路径与越界路径在访问文件系统前被拒绝。"""
+    """越界路径在访问文件系统前被拒绝。"""
+
+    registry, _ = _registry(tmp_path)
+
+    result = registry.execute(
+        ToolCall(call_id="call-1", name="log_query", arguments={"path": path})
+    )
+
+    assert result.is_success is False
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+
+
+@pytest.mark.parametrize("path", ["C:/outside.ndjson", "C:\\outside.ndjson"])
+@pytest.mark.skipif(os.name != "nt", reason="盘符绝对路径仅在 Windows 被识别")
+def test_log_query_rejects_windows_absolute_path(path: str, tmp_path: Path) -> None:
+    """Windows 盘符绝对路径在访问文件系统前被拒绝。"""
 
     registry, _ = _registry(tmp_path)
 
