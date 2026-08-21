@@ -3,8 +3,9 @@
 本文件与 ``test_deepseek.py`` 同构：全部使用注入客户端，不访问网络、
 不依赖真实 API Key。OpenAI 与 DeepSeek 共用 ``openai_compat`` 的转换
 逻辑，因此这里只验证 OpenAI 特有的边界：默认常量、密钥来源
-（``OPENAI_API_KEY``）、请求不带思考模式配置，以及共享转换在 OpenAI
-适配器下的回归。
+（``OPENAI_API_KEY``）、低推理档（``reasoning_effort`` 默认 ``low``、
+经 ``extra_body`` 传递）、``base_url`` 的 ``OPENAI_BASE_URL`` 环境变量
+覆盖，以及共享转换在 OpenAI 适配器下的回归。
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from self_react.models import Message, MessageRole, ToolCall
 from self_react.openai import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
     DEFAULT_TIMEOUT,
     OpenAILLM,
 )
@@ -89,10 +91,11 @@ def response_message(
 
 
 def test_openai_defaults_are_stable() -> None:
-    """默认地址、模型与超时是适配器公开的稳定常量。"""
+    """默认地址、模型、低推理档与超时是适配器公开的稳定常量。"""
 
     assert DEFAULT_BASE_URL == "https://api.openai.com/v1"
     assert DEFAULT_MODEL == "gpt-5.6"
+    assert DEFAULT_REASONING_EFFORT == "low"
     assert DEFAULT_TIMEOUT == 30.0
 
 
@@ -127,8 +130,8 @@ def test_openai_serializes_message_history_and_returns_normal_response() -> None
     assert request["model"] == DEFAULT_MODEL
     assert request["stream"] is False
     assert request["tools"] is None
-    # OpenAI 没有 DeepSeek 的思考模式开关，请求不带额外配置
-    assert request["extra_body"] is None
+    # 默认低推理档：reasoning_effort 经 extra_body 传给 Chat Completions
+    assert request["extra_body"] == {"reasoning_effort": "low"}
     assert request["messages"] == [
         {"role": "system", "content": "你是计算器"},
         {"role": "user", "content": "计算 2 + 2"},
@@ -275,6 +278,95 @@ def test_openai_requires_runtime_key_without_injected_client(
 
     with pytest.raises(LLMConfigurationError):
         OpenAILLM()
+
+
+def test_openai_reasoning_effort_none_omits_extra_body() -> None:
+    """reasoning_effort=None 时不传额外配置，使用供应商默认推理档。"""
+
+    client = RecordingClient(response=response_message(content="4"))
+    llm = OpenAILLM(client=client, reasoning_effort=None)
+
+    result = llm.complete([Message(role=MessageRole.USER, content="计算 2 + 2")])
+
+    assert result.content == "4"
+    assert llm.reasoning_effort is None
+    assert client.calls[0]["extra_body"] is None
+
+
+def test_openai_reasoning_effort_medium_is_sent_as_extra_body() -> None:
+    """显式 reasoning_effort 覆盖默认低档并随请求发送。"""
+
+    client = RecordingClient(response=response_message(content="4"))
+    llm = OpenAILLM(client=client, reasoning_effort="medium")
+
+    llm.complete([Message(role=MessageRole.USER, content="计算 2 + 2")])
+
+    assert llm.reasoning_effort == "medium"
+    assert client.calls[0]["extra_body"] == {"reasoning_effort": "medium"}
+
+
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    ["", "   ", "ultra", "LOW", 123, True],
+)
+def test_openai_rejects_invalid_reasoning_effort(
+    reasoning_effort: object,
+) -> None:
+    """空串、未知档位或非字符串在构造时抛稳定配置错误。"""
+
+    with pytest.raises(LLMConfigurationError):
+        OpenAILLM(client=RecordingClient(), reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
+
+
+def test_openai_base_url_reads_env_when_not_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未显式传 base_url 时优先读 OPENAI_BASE_URL 环境变量。"""
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://relay.example.com/v1")
+
+    llm = OpenAILLM(client=RecordingClient(response=response_message()))
+
+    assert llm.base_url == "https://relay.example.com/v1"
+
+
+def test_openai_base_url_explicit_argument_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 base_url 参数优先于 OPENAI_BASE_URL 环境变量。"""
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://relay.example.com/v1")
+
+    llm = OpenAILLM(client=RecordingClient(), base_url="https://example.com")
+
+    assert llm.base_url == "https://example.com"
+
+
+def test_openai_base_url_falls_back_to_default_when_env_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """环境变量缺失或空白时回退官方默认地址。"""
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    llm = OpenAILLM(client=RecordingClient())
+    assert llm.base_url == DEFAULT_BASE_URL
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "   ")
+    llm = OpenAILLM(client=RecordingClient())
+    assert llm.base_url == DEFAULT_BASE_URL
+
+
+def test_openai_real_client_construction_uses_env_key_and_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实客户端路径同时消费 OPENAI_API_KEY 与 OPENAI_BASE_URL。"""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://relay.example.com/v1")
+
+    llm = OpenAILLM()
+
+    assert llm.base_url == "https://relay.example.com/v1"
 
 
 @pytest.mark.parametrize(
@@ -430,7 +522,7 @@ def test_openai_complete_stream_requests_stream_and_assembles_content() -> None:
     assert len(client.calls) == 1
     request = client.calls[0]
     assert request["stream"] is True
-    assert request["extra_body"] is None
+    assert request["extra_body"] == {"reasoning_effort": "low"}
     assert "".join(chunk.content for chunk in chunks) == "你好"
     assert collect_stream(chunks) == Message(role=MessageRole.ASSISTANT, content="你好")
 

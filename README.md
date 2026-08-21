@@ -49,19 +49,23 @@ uv sync
 运行时按所选模型需要 DeepSeek 或 OpenAI 的 API Key。`run --model deepseek`
 从进程环境变量 `DEEPSEEK_API_KEY` 读取密钥（见
 [`deepseek.py`](src/self_react/deepseek.py)）；`run --model openai` 从
-`OPENAI_API_KEY` 读取密钥（见 [`openai.py`](src/self_react/openai.py)）。
-密钥不会写入领域状态、日志或仓库。
+`OPENAI_API_KEY` 读取密钥（见 [`openai.py`](src/self_react/openai.py)），
+并可选设置 `OPENAI_BASE_URL` 指向 OpenAI 兼容中转（不设置时用官方地址）。
+OpenAI 适配器默认低推理档（`reasoning_effort=low`，经 `extra_body` 下发），
+控制 GPT-5 系列的推理 token 成本。密钥不会写入领域状态、日志或仓库。
 
 ```powershell
 # PowerShell：只在当前终端生效
 $env:DEEPSEEK_API_KEY = "sk-你的密钥"
-$env:OPENAI_API_KEY = "sk-你的密钥"   # 使用 OpenAI 模型时设置
+$env:OPENAI_API_KEY = "sk-你的密钥"          # 使用 OpenAI 模型时设置
+$env:OPENAI_BASE_URL = "https://中转地址/v1"  # 可选：OpenAI 兼容中转
 ```
 
 ```bash
 # Bash：只在当前终端生效
 export DEEPSEEK_API_KEY="sk-你的密钥"
-export OPENAI_API_KEY="sk-你的密钥"   # 使用 OpenAI 模型时设置
+export OPENAI_API_KEY="sk-你的密钥"           # 使用 OpenAI 模型时设置
+export OPENAI_BASE_URL="https://中转地址/v1"  # 可选：OpenAI 兼容中转
 ```
 
 也可以把密钥放在本地 `.env` 文件（已被 `.gitignore` 忽略，不会提交）。项目
@@ -166,7 +170,7 @@ uv run self-react run "排查 promjet 网站 2021-12-17 凌晨的 404 突增，�
 | `models.py` | Pydantic 领域模型：`Message`、`ToolCall`、`ToolResult`、`Observation`、`AgentState`、`TraceStep` 等，所有跨边界数据走同一契约 |
 | `llm.py` | `LLM` 协议与确定性 Fake LLM |
 | `deepseek.py` | DeepSeek OpenAI 兼容 Chat Completions 适配器，只做请求/响应转换（与 OpenAI 共用转换逻辑） |
-| `openai.py` | OpenAI 原生 Chat Completions 适配器，默认读取 `OPENAI_API_KEY`，`base_url`/`model`/`timeout` 可配置 |
+| `openai.py` | OpenAI 原生 Chat Completions 适配器，默认读取 `OPENAI_API_KEY`，`base_url`（含 `OPENAI_BASE_URL` 环境变量）、`model`、`timeout`、`reasoning_effort`（默认低推理档）可配置 |
 | `openai_compat.py` | DeepSeek/OpenAI 共用的消息、工具定义与响应转换逻辑 |
 | `providers.py` | 模型 provider 注册表与工厂：按 `--model` 选择适配器，提供注册扩展点 |
 | `prompts.py` | 最小系统提示词渲染：任务规则 + 工具清单 + 输出格式契约 |
