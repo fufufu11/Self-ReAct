@@ -347,8 +347,8 @@ def test_query_after_repeated_query_intercept_is_hard_stopped() -> None:
     assert hard.retryable is False
 
 
-def test_query_after_zero_hit_intercept_is_hard_stopped() -> None:
-    """0 命中软拦截后仍发起查询 → REPEATED_QUERY_STOP 硬终止。"""
+def test_zero_hit_intercept_does_not_trigger_hard_stop() -> None:
+    """0 命中软拦截不触发硬兜底：换维度继续查属于正常排查。"""
 
     registry = ToolRegistry()
     registry.register(RunbookSearchTool(entries=[_runbook_entry()]))
@@ -356,20 +356,22 @@ def test_query_after_zero_hit_intercept_is_hard_stopped() -> None:
         [
             _tool_call_json("q1", "runbook_search", {"query": "xyzzy 不存在的主题"}),
             _tool_call_json("q2", "runbook_search", {"query": "另一个也不存在"}),
+            _final_answer_json("两个方向都 0 命中，基于现有证据收尾。"),
         ]
     )
 
-    state = Agent(llm=llm, registry=registry, max_steps=2).run("检索无结果")
+    state = Agent(llm=llm, registry=registry, max_steps=3).run("检索无结果")
 
-    assert state.termination_reason is TerminationReason.REPEATED_QUERY_STOP
-    soft = state.trace[0].observation
-    assert soft is not None
-    assert soft.error_code is ToolErrorCode.REPEATED_QUERY
-    assert soft.retryable is True
-    hard = state.trace[1].observation
-    assert hard is not None
-    assert hard.error_code is ToolErrorCode.REPEATED_QUERY
-    assert hard.retryable is False
+    assert state.termination_reason is TerminationReason.FINAL_ANSWER
+    # 第一次 0 命中软拦截后，第二次查询不被硬止，仍是软拦截（retryable=True）
+    first = state.trace[0].observation
+    assert first is not None
+    assert first.error_code is ToolErrorCode.REPEATED_QUERY
+    assert first.retryable is True
+    second = state.trace[1].observation
+    assert second is not None
+    assert second.error_code is ToolErrorCode.REPEATED_QUERY
+    assert second.retryable is True
 
 
 def test_non_query_tool_after_intercept_cancels_hard_stop() -> None:

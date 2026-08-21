@@ -24,10 +24,11 @@ Day 11 的输出解析器串成一个有界闭环：每一轮用当前消息上�
 「有效」与「无效」：0 命中、参数与最近一次查询完全相同的查询被拦下并回写
 ``REPEATED_QUERY`` 收尾引导；有效查询累计达到阈值（默认 3）时分派前兜底
 拦截；``file_reader`` 读发布记录不打断，其余非查询工具清零。若一次查询被
-``REPEATED_QUERY`` 软拦截后，下一轮模型仍发起查询类工具，则视为「被拦后仍
-连续查询、拒绝收尾」，直接以不可恢复的 ``REPEATED_QUERY`` 终止
+``REPEATED_QUERY`` 软拦截（0 命中除外）后，下一轮模型仍发起查询类工具，则视为
+「被拦后仍连续查询、拒绝收尾」，直接以不可恢复的 ``REPEATED_QUERY`` 终止
 （终止原因 ``REPEATED_QUERY_STOP``），避免步数耗尽；中间插入任何非查询工具
-（含 ``file_reader``）则视为换策略，解除该硬兜底。
+（含 ``file_reader``）则视为换策略，解除该硬兜底。0 命中不触发硬兜底：它代表
+「这个维度没有数据」，换维度继续查属于正常排查而非打转。
 """
 
 from __future__ import annotations
@@ -562,6 +563,7 @@ class Agent:
             # 有效查询累计达到阈值时分派前兜底拦截；file_reader 读发布记录不
             # 打断，其余非查询工具清零。
             is_query = decision.name in _QUERY_TOOL_NAMES
+            zero_hit_intercept = False
 
             if is_query and pending_repeated_query_stop:
                 # 硬兜底：上一轮查询已被 REPEATED_QUERY 软拦截要求收尾，本轮仍
@@ -623,11 +625,13 @@ class Agent:
                             message=_QUERY_ZERO_HIT_MESSAGE.format(decision.name),
                             retryable=True,
                         )
+                        zero_hit_intercept = True
 
             # 更新护栏状态：查询类工具始终记录「最近一次查询」参数，仅在成功
             # （有效）时累加；file_reader 保留现状不打断；其余非查询工具清零。
-            # 硬兜底状态位同步：查询被 REPEATED_QUERY 软拦截后置位，任何非查询
-            # 工具（含 file_reader）视为换策略而复位。
+            # 硬兜底状态位同步：查询被 REPEATED_QUERY 软拦截后置位（0 命中除外，
+            # 因为 0 命中是「这个维度确实没数据」的合法结果，换维度继续查是正常
+            # 排查），任何非查询工具（含 file_reader）视为换策略而复位。
             if is_query:
                 last_query_arguments = decision.arguments
                 if result.is_success:
@@ -637,6 +641,7 @@ class Agent:
                     pending_repeated_query_stop = (
                         result.error is not None
                         and result.error.code is ToolErrorCode.REPEATED_QUERY
+                        and not zero_hit_intercept
                     )
             else:
                 pending_repeated_query_stop = False
